@@ -1,5 +1,5 @@
 [package]
-name = "polling"
+name = "ntex-polling"
 # When publishing a new version:
 # - Update CHANGELOG.md
 # - Create "v3.x.y" git tag
@@ -9,7 +9,7 @@ edition = "2021"
 rust-version = "1.63"
 description = "Portable interface to epoll, kqueue, event ports, and IOCP"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/smol-rs/polling"
+repository = "https://github.com/fafhrd91/polling"
 keywords = ["mio", "epoll", "kqueue", "iocp"]
 categories = ["asynchronous", "network-programming", "os"]
 exclude = ["/.*"]
