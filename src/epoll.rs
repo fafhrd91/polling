@@ -362,6 +362,7 @@ impl EventExtra {
     #[inline]
     pub fn set_hup(&mut self, active: bool) {
         self.flags.set(epoll::EventFlags::HUP, active);
+        self.flags.set(epoll::EventFlags::RDHUP, active);
     }
 
     /// Add the priority flag to this event.
@@ -373,7 +374,8 @@ impl EventExtra {
     /// Tell if the interrupt flag is set.
     #[inline]
     pub fn is_hup(&self) -> bool {
-        self.flags.contains(epoll::EventFlags::HUP)
+        self.flags
+            .intersects(epoll::EventFlags::HUP | epoll::EventFlags::RDHUP)
     }
 
     /// Tell if the priority flag is set.
