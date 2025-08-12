@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::io;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::sync::RwLock;
-use std::time::Duration;
+use std::time::Instant;
 
 use rustix::buffer::spare_capacity;
 use rustix::event::{kqueue, Timespec};
@@ -63,6 +63,7 @@ impl Poller {
         // Register the notification pipe.
         poller.notify.register(&poller)?;
 
+        #[cfg(feature = "tracing")]
         tracing::trace!(
             kqueue_fd = ?poller.kqueue_fd.as_raw_fd(),
             "new"
@@ -94,6 +95,7 @@ impl Poller {
 
     /// Modifies an existing file descriptor.
     pub fn modify(&self, fd: BorrowedFd<'_>, ev: Event, mode: PollMode) -> io::Result<()> {
+        #[cfg(feature = "tracing")]
         let span = if !self.notify.has_fd(fd) {
             let span = tracing::trace_span!(
                 "add",
@@ -105,6 +107,7 @@ impl Poller {
         } else {
             None
         };
+        #[cfg(feature = "tracing")]
         let _enter = span.as_ref().map(|s| s.enter());
 
         self.has_source(SourceId::Fd(fd.as_raw_fd()))?;
@@ -231,14 +234,18 @@ impl Poller {
         self.remove_source(SourceId::Fd(fd.as_raw_fd()))
     }
 
-    /// Waits for I/O events with an optional timeout.
-    pub fn wait(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<()> {
+    /// Waits for I/O events with an optional deadline.
+    pub fn wait_deadline(&self, events: &mut Events, deadline: Option<Instant>) -> io::Result<()> {
+        #[cfg(feature = "tracing")]
         let span = tracing::trace_span!(
             "wait",
             kqueue_fd = ?self.kqueue_fd.as_raw_fd(),
-            ?timeout,
+            ?deadline,
         );
+        #[cfg(feature = "tracing")]
         let _enter = span.enter();
+
+        let timeout = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
 
         // Timeout for kevent. In case of overflow, use no timeout.
         let timeout = match timeout {
@@ -248,7 +255,7 @@ impl Poller {
 
         // Wait for I/O events.
         let changelist = [];
-        let res = unsafe {
+        let _res = unsafe {
             kqueue::kevent_timespec(
                 &self.kqueue_fd,
                 &changelist,
@@ -257,9 +264,10 @@ impl Poller {
             )?
         };
 
+        #[cfg(feature = "tracing")]
         tracing::trace!(
             kqueue_fd = ?self.kqueue_fd.as_raw_fd(),
-            ?res,
+            res = ?_res,
             "new events",
         );
 
@@ -271,10 +279,12 @@ impl Poller {
 
     /// Sends a notification to wake up the current or next `wait()` call.
     pub fn notify(&self) -> io::Result<()> {
+        #[cfg(feature = "tracing")]
         let span = tracing::trace_span!(
             "notify",
             kqueue_fd = ?self.kqueue_fd.as_raw_fd(),
         );
+        #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
         self.notify.notify(self).ok();
@@ -296,10 +306,12 @@ impl AsFd for Poller {
 
 impl Drop for Poller {
     fn drop(&mut self) {
+        #[cfg(feature = "tracing")]
         let span = tracing::trace_span!(
             "drop",
             kqueue_fd = ?self.kqueue_fd.as_raw_fd(),
         );
+        #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
         let _ = self.notify.deregister(self);
@@ -421,6 +433,7 @@ mod notify {
     use super::Poller;
     use rustix::event::kqueue;
     use std::io;
+    #[cfg(feature = "tracing")]
     use std::os::unix::io::BorrowedFd;
 
     /// A notification pipe.
@@ -486,6 +499,7 @@ mod notify {
         }
 
         /// Whether this raw file descriptor is associated with this pipe.
+        #[cfg(feature = "tracing")]
         pub(super) fn has_fd(&self, _fd: BorrowedFd<'_>) -> bool {
             false
         }
@@ -501,8 +515,10 @@ mod notify {
     use super::Poller;
     use crate::{Event, PollMode, NOTIFY_KEY};
     use std::io::{self, prelude::*};
+    #[cfg(feature = "tracing")]
+    use std::os::unix::io::BorrowedFd;
     use std::os::unix::{
-        io::{AsFd, AsRawFd, BorrowedFd},
+        io::{AsFd, AsRawFd},
         net::UnixStream,
     };
 
@@ -572,6 +588,7 @@ mod notify {
         }
 
         /// Whether this raw file descriptor is associated with this pipe.
+        #[cfg(feature = "tracing")]
         pub(super) fn has_fd(&self, fd: BorrowedFd<'_>) -> bool {
             self.read_stream.as_raw_fd() == fd.as_raw_fd()
         }
