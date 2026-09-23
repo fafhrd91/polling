@@ -678,6 +678,12 @@ impl EventExtra {
         self.flags.intersects(AfdPollMask::ABORT)
     }
 
+    /// Is this a RDHUP event?
+    #[inline]
+    pub fn is_rd_hup(&self) -> bool {
+        false
+    }
+
     /// Is this a PRI event?
     #[inline]
     pub fn is_pri(&self) -> bool {
@@ -688,6 +694,12 @@ impl EventExtra {
     #[inline]
     pub fn set_hup(&mut self, active: bool) {
         self.flags.set(AfdPollMask::ABORT, active);
+    }
+
+    /// Set up a listener for RDHUP events.
+    #[inline]
+    pub fn set_rd_hup(&mut self, _: bool) {
+        // ..
     }
 
     /// Set up a listener for PRI events.

@@ -242,6 +242,24 @@ impl Event {
         self.extra.set_hup(active);
     }
 
+    /// Add rd interruption events to this interest.
+    ///
+    /// This usually indicates that the file descriptor or socket has been closed. It corresponds
+    /// to the `EPOLLRDHUP` and `POLLRDHUP` events.
+    ///
+    /// Interruption events are only supported on the following platforms:
+    ///
+    /// - `epoll`
+    /// - `poll`
+    /// - IOCP
+    /// - Event Ports
+    ///
+    /// On other platforms, this function is a no-op.
+    #[inline]
+    pub fn set_rd_interrupt(&mut self, active: bool) {
+        self.extra.set_rd_hup(active);
+    }
+
     /// Add interruption events to this interest.
     ///
     /// This usually indicates that the file descriptor or socket has been closed. It corresponds
@@ -258,6 +276,25 @@ impl Event {
     #[inline]
     pub fn with_interrupt(mut self) -> Self {
         self.set_interrupt(true);
+        self
+    }
+
+    /// Add rd interruption events to this interest.
+    ///
+    /// This usually indicates that the file descriptor or socket has been closed. It corresponds
+    /// to the `EPOLLRDHUP` and `POLLRDHUP` events.
+    ///
+    /// Interruption events are only supported on the following platforms:
+    ///
+    /// - `epoll`
+    /// - `poll`
+    /// - IOCP
+    /// - Event Ports
+    ///
+    /// On other platforms, this function is a no-op.
+    #[inline]
+    pub fn with_rd_interrupt(mut self) -> Self {
+        self.set_rd_interrupt(true);
         self
     }
 
@@ -314,6 +351,12 @@ impl Event {
     #[inline]
     pub fn is_interrupt(&self) -> bool {
         self.extra.is_hup()
+    }
+
+    /// Tell if this event is the result of an rd interrupt notification.
+    #[inline]
+    pub fn is_rd_interrupt(&self) -> bool {
+        self.extra.is_rd_hup()
     }
 
     /// Tell if this event is the result of a priority notification.

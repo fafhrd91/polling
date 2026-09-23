@@ -410,6 +410,12 @@ impl EventExtra {
         self.flags.set(PollFlags::HUP, value);
     }
 
+    /// Set the rd interrupt flag.
+    #[inline]
+    pub fn set_rd_hup(&mut self, value: bool) {
+        self.flags.set(PollFlags::RDHUP, value);
+    }
+
     /// Set the priority flag.
     #[inline]
     pub fn set_pri(&mut self, value: bool) {
@@ -420,6 +426,12 @@ impl EventExtra {
     #[inline]
     pub fn is_hup(&self) -> bool {
         self.flags.contains(PollFlags::HUP)
+    }
+
+    /// Is this an rd interrupt event?
+    #[inline]
+    pub fn is_rd_hup(&self) -> bool {
+        self.flags.contains(PollFlags::RDHUP)
     }
 
     /// Is this a priority event?

@@ -384,6 +384,12 @@ impl EventExtra {
         // No-op.
     }
 
+    /// Set the rd interrupt flag.
+    #[inline]
+    pub fn set_rd_hup(&mut self, _value: bool) {
+        // No-op.
+    }
+
     /// Set the priority flag.
     #[inline]
     pub fn set_pri(&mut self, _value: bool) {
@@ -393,6 +399,12 @@ impl EventExtra {
     /// Is the interrupt flag set?
     #[inline]
     pub fn is_hup(&self) -> bool {
+        false
+    }
+
+    /// Is the rd interrupt flag set?
+    #[inline]
+    pub fn is_rd_hup(&self) -> bool {
         false
     }
 
