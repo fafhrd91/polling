@@ -5,6 +5,11 @@
 - Add `Poller::modify_deferred` and `Poller::modify_with_mode_deferred`, which
   apply the change with the next wait.
 - kqueue: submit deferred changes with the wait call in a single `kevent`.
+- **Breaking:** `Poller` is no longer `Sync`, it is used by the waiting thread
+  only, which removes the internal locks (poll backend `Mutex`/`Condvar`,
+  kqueue `RwLock`/`Mutex`). Use `Poller::notifier()` to get a `Notifier` that
+  wakes the poller from other threads. On Windows, `NotifierIocpExt::post()`
+  posts completion packets from other threads.
 
 # Version 3.11.0
 

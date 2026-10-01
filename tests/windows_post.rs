@@ -2,10 +2,9 @@
 
 #![cfg(windows)]
 
-use polling::os::iocp::{CompletionPacket, PollerIocpExt};
+use polling::os::iocp::{CompletionPacket, NotifierIocpExt, PollerIocpExt};
 use polling::{Event, Events, Poller};
 
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -28,14 +27,14 @@ fn post_smoke() {
 
 #[test]
 fn post_multithread() {
-    let poller = Arc::new(Poller::new().unwrap());
+    let poller = Poller::new().unwrap();
     let mut events = Events::new();
 
     thread::spawn({
-        let poller = Arc::clone(&poller);
+        let notifier = poller.notifier();
         move || {
             for i in 0..3 {
-                poller
+                notifier
                     .post(CompletionPacket::new(Event::writable(i)))
                     .unwrap();
 

@@ -1,9 +1,10 @@
 //! Bindings to epoll (Linux, Android).
 
+#[cfg(not(target_os = "redox"))]
+use std::cell::Cell;
 use std::io;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
-#[cfg(not(target_os = "redox"))]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(not(target_os = "redox"))]
@@ -28,8 +29,8 @@ pub struct Poller {
     /// File descriptor for the epoll instance.
     epoll_fd: OwnedFd,
 
-    /// Notifier used to wake up epoll.
-    notifier: Notifier,
+    /// Notifier used to wake up epoll, shared with the wakers.
+    notifier: Arc<Notifier>,
 
     /// File descriptor for the timerfd that produces timeouts.
     ///
@@ -39,7 +40,7 @@ pub struct Poller {
 
     /// Whether the timerfd may be armed by a previous wait.
     #[cfg(not(target_os = "redox"))]
-    timer_armed: AtomicBool,
+    timer_armed: Cell<bool>,
 }
 
 /// Polling mode of the notifier.
@@ -60,7 +61,7 @@ impl Poller {
         let epoll_fd = epoll::create(epoll::CreateFlags::CLOEXEC)?;
 
         // Set up notifier and timerfd.
-        let notifier = Notifier::new()?;
+        let notifier = Arc::new(Notifier::new()?);
         #[cfg(not(target_os = "redox"))]
         let timer_fd = timerfd_create(
             TimerfdClockId::Monotonic,
@@ -74,7 +75,7 @@ impl Poller {
             #[cfg(not(target_os = "redox"))]
             timer_fd,
             #[cfg(not(target_os = "redox"))]
-            timer_armed: AtomicBool::new(false),
+            timer_armed: Cell::new(false),
         };
 
         unsafe {
@@ -209,12 +210,12 @@ impl Poller {
                 it_value.tv_sec = t.as_secs() as _;
                 it_value.tv_nsec = t.subsec_nanos() as _;
                 set_timer(timer_fd, it_value)?;
-                self.timer_armed.store(true, Ordering::Relaxed);
+                self.timer_armed.set(true);
                 Some(timer_fd)
             }
             (Some(timer_fd), _) => {
                 // A timer left armed by a previous wait would wake this one up.
-                if self.timer_armed.swap(false, Ordering::Relaxed) {
+                if self.timer_armed.replace(false) {
                     set_timer(timer_fd, TS_ZERO)?;
                 }
                 None
@@ -270,18 +271,25 @@ impl Poller {
         Ok(())
     }
 
+    /// Returns a waker that wakes up the current or next `wait()` call.
+    pub fn waker(&self) -> Waker {
+        Waker(self.notifier.clone())
+    }
+}
+
+/// Wakes up the poller, can be used from any thread.
+#[derive(Debug, Clone)]
+pub struct Waker(Arc<Notifier>);
+
+impl Waker {
     /// Sends a notification to wake up the current or next `wait()` call.
     pub fn notify(&self) -> io::Result<()> {
         #[cfg(feature = "tracing")]
-        let span = tracing::trace_span!(
-            "notify",
-            epoll_fd = ?self.epoll_fd.as_raw_fd(),
-            notifier = ?self.notifier,
-        );
+        let span = tracing::trace_span!("notify", notifier = ?self.0);
         #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
-        self.notifier.notify();
+        self.0.notify();
         Ok(())
     }
 }

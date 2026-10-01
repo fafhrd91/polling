@@ -2,8 +2,8 @@
 
 pub use crate::sys::CompletionPacket;
 
-use super::__private::PollerSealed;
-use crate::{Event, PollMode, Poller};
+use super::__private::{NotifierSealed, PollerSealed};
+use crate::{Event, Notifier, PollMode, Poller};
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, RawHandle};
@@ -18,25 +18,17 @@ pub trait PollerIocpExt: PollerSealed {
     ///
     /// # Examples
     ///
+    /// To post events from other threads, use [`NotifierIocpExt::post()`].
+    ///
+    /// # Examples
+    ///
     /// ```rust
     /// use polling::{Poller, Event, Events};
     /// use polling::os::iocp::{CompletionPacket, PollerIocpExt};
     ///
-    /// use std::thread;
-    /// use std::sync::Arc;
-    /// use std::time::Duration;
-    ///
     /// # fn main() -> std::io::Result<()> {
-    /// // Spawn a thread to wake us up after 100ms.
-    /// let poller = Arc::new(Poller::new()?);
-    /// thread::spawn({
-    ///     let poller = poller.clone();
-    ///     move || {
-    ///         let packet = CompletionPacket::new(Event::readable(0));
-    ///         thread::sleep(Duration::from_millis(100));
-    ///         poller.post(packet).unwrap();
-    ///     }
-    /// });
+    /// let poller = Poller::new()?;
+    /// poller.post(CompletionPacket::new(Event::readable(0)))?;
     ///
     /// // Wait for the event.
     /// let mut events = Events::new();
@@ -191,6 +183,48 @@ pub trait PollerIocpExt: PollerSealed {
     /// poller.remove_waitable(&child).unwrap();
     /// ```
     fn remove_waitable(&self, handle: impl AsWaitable) -> io::Result<()>;
+}
+
+/// Extension trait for the [`Notifier`] type that provides functionality specific to IOCP-based
+/// platforms.
+///
+/// [`Notifier`]: crate::Notifier
+pub trait NotifierIocpExt: NotifierSealed {
+    /// Post a new [`Event`] to the poller from any thread.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use polling::{Poller, Event, Events};
+    /// use polling::os::iocp::{CompletionPacket, NotifierIocpExt};
+    ///
+    /// use std::thread;
+    /// use std::time::Duration;
+    ///
+    /// # fn main() -> std::io::Result<()> {
+    /// // Spawn a thread to wake us up after 100ms.
+    /// let poller = Poller::new()?;
+    /// let notifier = poller.notifier();
+    /// thread::spawn(move || {
+    ///     let packet = CompletionPacket::new(Event::readable(0));
+    ///     thread::sleep(Duration::from_millis(100));
+    ///     notifier.post(packet).unwrap();
+    /// });
+    ///
+    /// // Wait for the event.
+    /// let mut events = Events::new();
+    /// poller.wait(&mut events, None)?;
+    ///
+    /// assert_eq!(events.len(), 1);
+    /// # Ok(()) }
+    /// ```
+    fn post(&self, packet: CompletionPacket) -> io::Result<()>;
+}
+
+impl NotifierIocpExt for Notifier {
+    fn post(&self, packet: CompletionPacket) -> io::Result<()> {
+        self.0.waker.post(packet)
+    }
 }
 
 impl PollerIocpExt for Poller {

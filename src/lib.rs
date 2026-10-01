@@ -13,7 +13,8 @@
 //! kind. However, level and edge triggered modes are also available for certain operating
 //! systems. See the documentation of the [`PollMode`] type for more information.
 //!
-//! Only one thread can be waiting for I/O events at a time.
+//! A [`Poller`] is [`Send`] but not [`Sync`], it is used by the thread that waits for I/O
+//! events. Other threads can wake it up with a [`Notifier`].
 //!
 //! # Examples
 //!
@@ -69,7 +70,7 @@ use std::io;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cfg_if::cfg_if;
@@ -474,10 +475,15 @@ impl Event {
 }
 
 /// Waits for I/O events.
+///
+/// The poller is [`Send`] but not [`Sync`], it is used by the thread that waits for I/O
+/// events. Use a [`Notifier`] to wake it up from other threads.
 pub struct Poller {
     poller: sys::Poller,
-    lock: Mutex<()>,
-    notified: AtomicBool,
+    notifier: Notifier,
+
+    /// The poller is used by a single thread, which lets the backends avoid locking.
+    _not_sync: PhantomData<Cell<()>>,
 }
 
 impl Poller {
@@ -492,10 +498,16 @@ impl Poller {
     /// # std::io::Result::Ok(())
     /// ```
     pub fn new() -> io::Result<Poller> {
-        Ok(Poller {
-            poller: sys::Poller::new()?,
-            lock: Mutex::new(()),
+        let poller = sys::Poller::new()?;
+        let notifier = Notifier(Arc::new(NotifierInner {
             notified: AtomicBool::new(false),
+            waker: poller.waker(),
+        }));
+
+        Ok(Poller {
+            poller,
+            notifier,
+            _not_sync: PhantomData,
         })
     }
 
@@ -728,8 +740,7 @@ impl Poller {
     /// on kqueue the change is queued and submitted by the next [`wait()`][`Poller::wait()`]
     /// together with its `kevent` system call. Other platforms apply the change immediately.
     ///
-    /// A queued change takes effect when the next wait starts, a wait that is already blocked
-    /// does not see it. This is intended to be called from the thread that waits.
+    /// A queued change takes effect when the next wait starts.
     ///
     /// On kqueue a filter that is not wanted is disabled rather than deleted, and keeps the mode
     /// it was created with, so a source should keep using the same mode.
@@ -788,17 +799,13 @@ impl Poller {
     /// [`Events`][Events::clear()] before calling [`wait()`][`Poller::wait()`]!
     ///
     /// This method will return with no new events if a notification is delivered by the
-    /// [`notify()`] method, or the timeout is reached. Sometimes it may even return with no events
-    /// spuriously.
-    ///
-    /// Only one thread can wait on I/O. If another thread is already in [`wait()`], concurrent
-    /// calls to this method will return immediately with no new events.
+    /// [`notify()`] method or a [`Notifier`], or the timeout is reached. Sometimes it may even
+    /// return with no events spuriously.
     ///
     /// If the operating system is ready to deliver a large number of events at once, this method
     /// may decide to deliver them in smaller batches.
     ///
     /// [`notify()`]: `Poller::notify()`
-    /// [`wait()`]: `Poller::wait()`
     ///
     /// # Examples
     ///
@@ -841,36 +848,55 @@ impl Poller {
         #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
-        if let Ok(_lock) = self.lock.try_lock() {
-            loop {
-                // Wait for I/O events.
-                if let Err(e) = self.poller.wait_deadline(&mut events.events, deadline) {
-                    // If the wait was interrupted by a signal, clear events and try again.
-                    if e.kind() == io::ErrorKind::Interrupted {
-                        events.clear();
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
+        loop {
+            // Wait for I/O events.
+            if let Err(e) = self.poller.wait_deadline(&mut events.events, deadline) {
+                // If the wait was interrupted by a signal, clear events and try again.
+                if e.kind() == io::ErrorKind::Interrupted {
+                    events.clear();
+                    continue;
+                } else {
+                    return Err(e);
                 }
-
-                // Clear the notification, if any.
-                self.notified.swap(false, Ordering::SeqCst);
-
-                // Indicate number of events.
-                return Ok(events.len());
             }
-        } else {
-            #[cfg(feature = "tracing")]
-            tracing::trace!("wait: skipping because another thread is already waiting on I/O");
-            Ok(0)
+
+            // Clear the notification, if any.
+            self.notifier.0.notified.swap(false, Ordering::SeqCst);
+
+            // Indicate number of events.
+            return Ok(events.len());
         }
+    }
+
+    /// Returns a [`Notifier`] that wakes up this poller from any thread.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use polling::{Events, Poller};
+    /// use std::thread;
+    ///
+    /// let poller = Poller::new()?;
+    /// let notifier = poller.notifier();
+    ///
+    /// // Notify the poller from another thread.
+    /// thread::spawn(move || notifier.notify().unwrap()).join().unwrap();
+    ///
+    /// let mut events = Events::new();
+    /// poller.wait(&mut events, None)?; // wakes up immediately
+    /// assert!(events.is_empty());
+    /// # std::io::Result::Ok(())
+    /// ```
+    pub fn notifier(&self) -> Notifier {
+        self.notifier.clone()
     }
 
     /// Wakes up the current or the following invocation of [`wait()`].
     ///
-    /// If no thread is calling [`wait()`] right now, this method will cause the following call
-    /// to wake up immediately.
+    /// If the poller is not waiting right now, this method will cause the following call
+    /// to [`wait()`] to wake up immediately.
+    ///
+    /// To wake up the poller from another thread, use a [`Notifier`].
     ///
     /// [`wait()`]: `Poller::wait()`
     ///
@@ -890,19 +916,52 @@ impl Poller {
     /// # std::io::Result::Ok(())
     /// ```
     pub fn notify(&self) -> io::Result<()> {
+        self.notifier.notify()
+    }
+}
+
+/// Wakes up a [`Poller`], can be used from any thread.
+///
+/// A notifier is created by [`Poller::notifier()`], it can be cloned and sent to other threads.
+/// It stays valid after the poller is dropped, notifications are ignored then.
+#[derive(Clone)]
+pub struct Notifier(Arc<NotifierInner>);
+
+struct NotifierInner {
+    /// Whether a notification is pending, avoids waking up the poller more than once.
+    notified: AtomicBool,
+    waker: sys::Waker,
+}
+
+impl Notifier {
+    /// Wakes up the current or the following invocation of [`Poller::wait()`].
+    ///
+    /// If the poller is not waiting right now, this method will cause the following call
+    /// to [`wait()`][`Poller::wait()`] to wake up immediately.
+    pub fn notify(&self) -> io::Result<()> {
         #[cfg(feature = "tracing")]
-        let span = tracing::trace_span!("Poller::notify");
+        let span = tracing::trace_span!("Notifier::notify");
         #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
         if self
+            .0
             .notified
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            self.poller.notify()?;
+            self.0.waker.notify()?;
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for Notifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Notifier")
+            .field("notified", &self.0.notified)
+            .field("waker", &self.0.waker)
+            .finish()
     }
 }
 
@@ -1214,7 +1273,10 @@ fn _assert_send_and_sync() {
     fn assert_sync<T: Sync>() {}
 
     assert_send::<Poller>();
-    assert_sync::<Poller>();
+    // Poller is !Sync
+
+    assert_send::<Notifier>();
+    assert_sync::<Notifier>();
 
     assert_send::<Event>();
     assert_sync::<Event>();

@@ -114,6 +114,32 @@ pub(super) struct Poller {
 unsafe impl Send for Poller {}
 unsafe impl Sync for Poller {}
 
+/// Wakes up the poller, can be used from any thread.
+#[derive(Debug, Clone)]
+pub(super) struct Waker {
+    /// The I/O completion port.
+    port: Arc<IoCompletionPort<Packet>>,
+
+    /// The packet used to notify the poller.
+    notifier: Packet,
+}
+
+unsafe impl Send for Waker {}
+unsafe impl Sync for Waker {}
+
+impl Waker {
+    /// Sends a notification to wake up the current or next `wait()` call.
+    pub(super) fn notify(&self) -> io::Result<()> {
+        // Push the notify packet into the IOCP.
+        self.port.post(0, 0, self.notifier.clone())
+    }
+
+    /// Push an IOCP packet into the queue.
+    pub(super) fn post(&self, packet: CompletionPacket) -> io::Result<()> {
+        self.port.post(0, 0, packet.0)
+    }
+}
+
 impl Poller {
     /// Creates a new poller.
     pub(super) fn new() -> io::Result<Self> {
@@ -515,10 +541,12 @@ impl Poller {
         Ok(())
     }
 
-    /// Notify this poller.
-    pub(super) fn notify(&self) -> io::Result<()> {
-        // Push the notify packet into the IOCP.
-        self.port.post(0, 0, self.notifier.clone())
+    /// Returns a waker that wakes up the current or next `wait()` call.
+    pub(super) fn waker(&self) -> Waker {
+        Waker {
+            port: self.port.clone(),
+            notifier: self.notifier.clone(),
+        }
     }
 
     /// Push an IOCP packet into the queue.

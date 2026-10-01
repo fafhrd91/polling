@@ -2,6 +2,7 @@
 
 use std::io;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rustix::buffer::spare_capacity;
@@ -14,8 +15,8 @@ use crate::{Event, PollMode};
 /// Interface to event ports.
 #[derive(Debug)]
 pub struct Poller {
-    /// File descriptor for the port instance.
-    port_fd: OwnedFd,
+    /// File descriptor for the port instance, shared with the wakers.
+    port_fd: Arc<OwnedFd>,
 }
 
 impl Poller {
@@ -31,7 +32,9 @@ impl Poller {
             "new",
         );
 
-        Ok(Poller { port_fd })
+        Ok(Poller {
+            port_fd: Arc::new(port_fd),
+        })
     }
 
     /// Whether this poller supports level-triggered events.
@@ -154,20 +157,28 @@ impl Poller {
         Ok(())
     }
 
+    /// Returns a waker that wakes up the current or next `wait()` call.
+    pub fn waker(&self) -> Waker {
+        Waker(self.port_fd.clone())
+    }
+}
+
+/// Wakes up the poller, can be used from any thread.
+#[derive(Debug, Clone)]
+pub struct Waker(Arc<OwnedFd>);
+
+impl Waker {
     /// Sends a notification to wake up the current or next `wait()` call.
     pub fn notify(&self) -> io::Result<()> {
         const PORT_SOURCE_USER: i32 = 3;
 
         #[cfg(feature = "tracing")]
-        let span = tracing::trace_span!(
-            "notify",
-            port_fd = ?self.port_fd.as_raw_fd(),
-        );
+        let span = tracing::trace_span!("notify", port_fd = ?self.0.as_raw_fd());
         #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
         // Use port_send to send a notification to the port.
-        port::send(&self.port_fd, PORT_SOURCE_USER, crate::NOTIFY_KEY as _)?;
+        port::send(&*self.0, PORT_SOURCE_USER, crate::NOTIFY_KEY as _)?;
 
         Ok(())
     }

@@ -23,13 +23,14 @@ fn simple() -> io::Result<()> {
 #[test]
 fn concurrent() -> io::Result<()> {
     let poller = Poller::new()?;
+    let notifier = poller.notifier();
     let mut events = Events::new();
 
     for _ in 0..2 {
         Parallel::new()
             .add(|| {
                 thread::sleep(Duration::from_secs(0));
-                poller.notify().unwrap();
+                notifier.notify().unwrap();
             })
             .finish(|| poller.wait(&mut events, None).unwrap());
     }

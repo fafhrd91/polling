@@ -1,9 +1,9 @@
 //! Bindings to poll (VxWorks, Fuchsia, other Unix systems).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(not(target_os = "hermit"))]
@@ -22,23 +22,15 @@ use crate::{Event, PollMode};
 #[derive(Debug)]
 pub struct Poller {
     /// File descriptors to poll.
-    fds: Mutex<Fds>,
-    /// Notification pipe for waking up the poller.
+    ///
+    /// The poller is only used by one thread, so `wait` never runs concurrently with
+    /// `add`, `modify` or `delete`.
+    fds: RefCell<Fds>,
+    /// Notification pipe for waking up the poller, shared with the wakers.
     ///
     /// On all platforms except ESP IDF, the `pipe` syscall is used.
     /// On ESP IDF, the `eventfd` syscall is used instead.
-    notify: notify::Notify,
-    /// The number of operations (`add`, `modify` or `delete`) that are currently waiting on the
-    /// mutex to become free. When this is nonzero, `wait` must be suspended until it reaches zero
-    /// again.
-    waiting_operations: AtomicUsize,
-    /// Whether `wait` has been notified by the user.
-    notified: AtomicBool,
-    /// The condition variable that gets notified when `waiting_operations` reaches zero or
-    /// `notified` becomes true.
-    ///
-    /// This is used with the `fds` mutex.
-    operations_complete: Condvar,
+    notify: Arc<notify::Notify>,
 }
 
 /// The file descriptors to poll in a `Poller`.
@@ -68,13 +60,13 @@ struct FdData {
 impl Poller {
     /// Creates a new poller.
     pub fn new() -> io::Result<Poller> {
-        let notify = notify::Notify::new()?;
+        let notify = Arc::new(notify::Notify::new()?);
 
         #[cfg(feature = "tracing")]
         tracing::trace!(?notify, "new");
 
         Ok(Self {
-            fds: Mutex::new(Fds {
+            fds: RefCell::new(Fds {
                 poll_fds: vec![PollFd::from_borrowed_fd(
                     // SAFETY: `notify.fd()` will remain valid until we drop `self`.
                     unsafe { BorrowedFd::borrow_raw(notify.fd().as_raw_fd()) },
@@ -83,9 +75,6 @@ impl Poller {
                 fd_data: HashMap::new(),
             }),
             notify,
-            waiting_operations: AtomicUsize::new(0),
-            operations_complete: Condvar::new(),
-            notified: AtomicBool::new(false),
         })
     }
 
@@ -225,120 +214,79 @@ impl Poller {
         #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
-        let mut fds = self.fds.lock().unwrap();
+        let mut fds = self.fds.borrow_mut();
+        let fds = &mut *fds;
 
-        loop {
-            // Complete all current operations.
-            loop {
-                if self.notified.swap(false, Ordering::SeqCst) {
-                    // `notify` will have sent a notification in case we were polling. We weren't,
-                    // so remove it.
-                    return self.notify.pop_notification();
-                } else if self.waiting_operations.load(Ordering::SeqCst) == 0 {
-                    break;
-                }
+        let timeout = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
 
-                fds = self.operations_complete.wait(fds).unwrap();
-            }
+        // Perform the poll.
+        let num_events = poll(&mut fds.poll_fds, timeout)?;
+        let notified = !fds.poll_fds[0].revents().is_empty();
+        let num_fd_events = if notified { num_events - 1 } else { num_events };
+        #[cfg(feature = "tracing")]
+        tracing::trace!(?num_events, ?notified, ?num_fd_events, "new events",);
 
-            let timeout =
-                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        // Read all notifications.
+        if notified {
+            self.notify.pop_all_notifications()?;
+        }
 
-            // Perform the poll.
-            let num_events = poll(&mut fds.poll_fds, timeout)?;
-            let notified = !fds.poll_fds[0].revents().is_empty();
-            let num_fd_events = if notified { num_events - 1 } else { num_events };
-            #[cfg(feature = "tracing")]
-            tracing::trace!(?num_events, ?notified, ?num_fd_events, "new events",);
+        // Store the events if there were any.
+        if num_fd_events > 0 {
+            events.inner.reserve(num_fd_events);
+            for fd_data in fds.fd_data.values_mut() {
+                let poll_fd = &mut fds.poll_fds[fd_data.poll_fds_index];
+                if !poll_fd.revents().is_empty() {
+                    // Store event
+                    let revents = poll_fd.revents();
+                    events.inner.push(Event {
+                        key: fd_data.key,
+                        readable: revents.intersects(read_events()),
+                        writable: revents.intersects(write_events()),
+                        extra: EventExtra { flags: revents },
+                    });
+                    // Remove interest if necessary
+                    if fd_data.remove {
+                        *poll_fd = PollFd::from_borrowed_fd(
+                            unsafe { BorrowedFd::borrow_raw(poll_fd.as_fd().as_raw_fd()) },
+                            PollFlags::empty(),
+                        );
+                    }
 
-            // Read all notifications.
-            if notified {
-                self.notify.pop_all_notifications()?;
-            }
-
-            // If the only event that occurred during polling was notification and it wasn't to
-            // exit, another thread is trying to perform an operation on the fds. Continue the
-            // loop.
-            if !self.notified.swap(false, Ordering::SeqCst) && num_fd_events == 0 && notified {
-                continue;
-            }
-
-            // Store the events if there were any.
-            if num_fd_events > 0 {
-                let fds = &mut *fds;
-
-                events.inner.reserve(num_fd_events);
-                for fd_data in fds.fd_data.values_mut() {
-                    let poll_fd = &mut fds.poll_fds[fd_data.poll_fds_index];
-                    if !poll_fd.revents().is_empty() {
-                        // Store event
-                        let revents = poll_fd.revents();
-                        events.inner.push(Event {
-                            key: fd_data.key,
-                            readable: revents.intersects(read_events()),
-                            writable: revents.intersects(write_events()),
-                            extra: EventExtra { flags: revents },
-                        });
-                        // Remove interest if necessary
-                        if fd_data.remove {
-                            *poll_fd = PollFd::from_borrowed_fd(
-                                unsafe { BorrowedFd::borrow_raw(poll_fd.as_fd().as_raw_fd()) },
-                                PollFlags::empty(),
-                            );
-                        }
-
-                        if events.inner.len() == num_fd_events {
-                            break;
-                        }
+                    if events.inner.len() == num_fd_events {
+                        break;
                     }
                 }
             }
-
-            break;
         }
 
         Ok(())
     }
 
+    /// Returns a waker that wakes up the current or next `wait()` call.
+    pub fn waker(&self) -> Waker {
+        Waker(self.notify.clone())
+    }
+
+    /// Perform a modification on `fds`.
+    fn modify_fds(&self, f: impl FnOnce(&mut Fds) -> io::Result<()>) -> io::Result<()> {
+        f(&mut self.fds.borrow_mut())
+    }
+}
+
+/// Wakes up the poller, can be used from any thread.
+#[derive(Debug, Clone)]
+pub struct Waker(Arc<notify::Notify>);
+
+impl Waker {
     /// Sends a notification to wake up the current or next `wait()` call.
     pub fn notify(&self) -> io::Result<()> {
         #[cfg(feature = "tracing")]
-        let span = tracing::trace_span!(
-            "notify",
-            notify_read = ?self.notify.fd().as_raw_fd(),
-        );
+        let span = tracing::trace_span!("notify", notify_read = ?self.0.fd().as_raw_fd());
         #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
-        if !self.notified.swap(true, Ordering::SeqCst) {
-            self.notify.notify()?;
-            self.operations_complete.notify_one();
-        }
-
-        Ok(())
-    }
-
-    /// Perform a modification on `fds`, interrupting the current caller of `wait` if it's running.
-    fn modify_fds(&self, f: impl FnOnce(&mut Fds) -> io::Result<()>) -> io::Result<()> {
-        self.waiting_operations.fetch_add(1, Ordering::SeqCst);
-
-        // Wake up the current caller of `wait` if there is one.
-        let sent_notification = self.notify.notify().is_ok();
-
-        let mut fds = self.fds.lock().unwrap();
-
-        // If there was no caller of `wait` our notification was not removed from the pipe.
-        if sent_notification {
-            let _ = self.notify.pop_notification();
-        }
-
-        let res = f(&mut fds);
-
-        if self.waiting_operations.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.operations_complete.notify_one();
-        }
-
-        res
+        self.0.notify()
     }
 }
 
@@ -694,9 +642,7 @@ mod notify {
         read_pipe: OwnedFd,
         /// The file descriptor of the write half of the notify pipe.
         ///
-        /// Data is written to this to wake up the current instance of `Poller::wait`, which can occur when the
-        /// user notifies it (in which case `Poller::notified` would have been set) or when an operation needs
-        /// to occur (in which case `Poller::waiting_operations` would have been incremented).
+        /// Data is written to this to wake up the current instance of `Poller::wait`.
         write_pipe: OwnedFd,
     }
 
@@ -742,31 +688,6 @@ mod notify {
             Ok(())
         }
 
-        /// Pops a notification (if any) from the pipe.
-        pub(super) fn pop_notification(&self) -> Result<(), io::Error> {
-            // Pipes on Vita do not guarantee that after `write` call succeeds, the
-            // data becomes immediately available for reading on the other side of the pipe.
-            // To ensure that the notification is not lost, the read side of the pipe is temporarily
-            // switched to blocking for a single `read` call.
-            #[cfg(target_os = "vita")]
-            rustix::fs::fcntl_setfl(
-                &self.read_pipe,
-                rustix::fs::fcntl_getfl(&self.read_pipe)? & !rustix::fs::OFlags::NONBLOCK,
-            )?;
-
-            let result = read(&self.read_pipe, &mut [0; 1]);
-
-            #[cfg(target_os = "vita")]
-            rustix::fs::fcntl_setfl(
-                &self.read_pipe,
-                rustix::fs::fcntl_getfl(&self.read_pipe)? | rustix::fs::OFlags::NONBLOCK,
-            )?;
-
-            result?;
-
-            Ok(())
-        }
-
         /// Pops all notifications from the pipe.
         pub(super) fn pop_all_notifications(&self) -> Result<(), io::Error> {
             while read(&self.read_pipe, &mut [0; 64]).is_ok() {}
@@ -798,9 +719,7 @@ mod notify {
         /// The file descriptor of the eventfd object. This is also stored as the first
         /// file descriptor in `fds.poll_fds`.
         ///
-        /// Data is written to this to wake up the current instance of `Poller::wait`, which can occur when the
-        /// user notifies it (in which case `Poller::notified` would have been set) or when an operation needs
-        /// to occur (in which case `Poller::waiting_operations` would have been incremented).
+        /// Data is written to this to wake up the current instance of `Poller::wait`.
         event_fd: OwnedFd,
     }
 
@@ -851,18 +770,11 @@ mod notify {
             Ok(())
         }
 
-        /// Pops a notification (if any) from the eventfd file descriptor.
-        pub(super) fn pop_notification(&self) -> Result<(), io::Error> {
-            read(self.event_fd.as_fd(), &mut [0; mem::size_of::<u64>()])?;
-
-            Ok(())
-        }
-
         /// Pops all notifications from the eventfd file descriptor.
         /// Since the eventfd object accumulates all writes in a single 64 bit value,
-        /// this operation is - in fact - equivalent to `pop_notification`.
+        /// a single read clears them.
         pub(super) fn pop_all_notifications(&self) -> Result<(), io::Error> {
-            let _ = self.pop_notification();
+            let _ = read(self.event_fd.as_fd(), &mut [0; mem::size_of::<u64>()]);
 
             Ok(())
         }

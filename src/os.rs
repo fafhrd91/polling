@@ -21,4 +21,10 @@ mod __private {
     pub trait PollerSealed {}
 
     impl PollerSealed for crate::Poller {}
+
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub trait NotifierSealed {}
+
+    impl NotifierSealed for crate::Notifier {}
 }

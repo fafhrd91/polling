@@ -1,9 +1,10 @@
 //! Bindings to kqueue (macOS, iOS, tvOS, watchOS, visionOS, FreeBSD, NetBSD, OpenBSD, DragonFly BSD).
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
-use std::sync::{Mutex, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rustix::buffer::spare_capacity;
@@ -12,16 +13,18 @@ use rustix::io::{fcntl_setfd, Errno, FdFlags};
 
 use crate::{Event, PollMode};
 
+pub use self::notify::Waker;
+
 /// Interface to kqueue.
 #[derive(Debug)]
 pub struct Poller {
-    /// File descriptor for the kqueue instance.
-    kqueue_fd: OwnedFd,
+    /// File descriptor for the kqueue instance, shared with the wakers.
+    kqueue_fd: Arc<OwnedFd>,
 
     /// List of sources currently registered in this poller.
     ///
     /// This is used to make sure the same source is not registered twice.
-    sources: RwLock<HashSet<SourceId>>,
+    sources: RefCell<HashSet<SourceId>>,
 
     /// Notification pipe for waking up the poller.
     ///
@@ -30,10 +33,10 @@ pub struct Poller {
     notify: notify::Notify,
 
     /// Changes queued by `modify_deferred()`, submitted by the next `wait_deadline()`.
-    pending: Mutex<Changes>,
+    pending: RefCell<Changes>,
 
     /// Changes being submitted by `wait_deadline()`, kept to reuse the allocation.
-    submit: Mutex<Changes>,
+    submit: RefCell<Changes>,
 }
 
 /// A list of changes for kqueue.
@@ -76,11 +79,11 @@ impl Poller {
         fcntl_setfd(&kqueue_fd, FdFlags::CLOEXEC)?;
 
         let poller = Poller {
-            kqueue_fd,
-            sources: RwLock::new(HashSet::new()),
+            kqueue_fd: Arc::new(kqueue_fd),
+            sources: RefCell::new(HashSet::new()),
             notify: notify::Notify::new()?,
-            pending: Mutex::new(Changes::default()),
-            submit: Mutex::new(Changes::default()),
+            pending: RefCell::new(Changes::default()),
+            submit: RefCell::new(Changes::default()),
         };
 
         // Register the notification pipe.
@@ -137,7 +140,7 @@ impl Poller {
 
         // Queued changes must not be applied after this one.
         {
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = self.pending.borrow_mut();
             if !pending.0.is_empty() {
                 let raw = fd.as_raw_fd();
                 pending.0.retain(|ev| {
@@ -205,7 +208,7 @@ impl Poller {
             }
         };
 
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self.pending.borrow_mut();
         pending.0.push(kqueue::Event::new(
             kqueue::EventFilter::Read(fd.as_raw_fd()),
             flags(ev.readable),
@@ -224,48 +227,13 @@ impl Poller {
     where
         A: Copy + AsRef<[kqueue::Event]> + AsMut<[kqueue::Event]>,
     {
-        let mut eventlist = Vec::with_capacity(changelist.as_ref().len());
-
-        // Apply changes.
-        {
-            let changelist = changelist.as_ref();
-
-            unsafe {
-                kqueue::kevent_timespec(
-                    &self.kqueue_fd,
-                    changelist,
-                    spare_capacity(&mut eventlist),
-                    None,
-                )?;
-            }
-        }
-
-        // Check for errors.
-        for &ev in &eventlist {
-            let data = ev.data();
-
-            // Explanation for ignoring EPIPE: https://github.com/tokio-rs/mio/issues/582
-            if (ev.flags().contains(kqueue::EventFlags::ERROR))
-                && data != 0
-                && data != Errno::NOENT.raw_os_error() as _
-                && data != Errno::PIPE.raw_os_error() as _
-            {
-                return Err(io::Error::from_raw_os_error(data as _));
-            }
-        }
-
-        Ok(())
+        submit_changes(&self.kqueue_fd, changelist)
     }
 
     /// Add a source to the sources set.
     #[inline]
     pub(crate) fn add_source(&self, source: SourceId) -> io::Result<()> {
-        if self
-            .sources
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(source)
-        {
+        if self.sources.borrow_mut().insert(source) {
             Ok(())
         } else {
             Err(io::Error::from(io::ErrorKind::AlreadyExists))
@@ -275,12 +243,7 @@ impl Poller {
     /// Tell if a source is currently inside the set.
     #[inline]
     pub(crate) fn has_source(&self, source: SourceId) -> io::Result<()> {
-        if self
-            .sources
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&source)
-        {
+        if self.sources.borrow().contains(&source) {
             Ok(())
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))
@@ -290,12 +253,7 @@ impl Poller {
     /// Remove a source from the sources set.
     #[inline]
     pub(crate) fn remove_source(&self, source: SourceId) -> io::Result<()> {
-        if self
-            .sources
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&source)
-        {
+        if self.sources.borrow_mut().remove(&source) {
             Ok(())
         } else {
             Err(io::Error::from(io::ErrorKind::NotFound))
@@ -330,11 +288,8 @@ impl Poller {
         };
 
         // Take the queued changes.
-        let mut submit = self.submit.lock().unwrap_or_else(|e| e.into_inner());
-        {
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::swap(&mut *pending, &mut *submit);
-        }
+        let mut submit = self.submit.borrow_mut();
+        std::mem::swap(&mut *self.pending.borrow_mut(), &mut *submit);
 
         // A failed change is reported in the event list. If the list is full, `kevent` fails
         // and stops applying changes, so make room for all of them.
@@ -369,19 +324,44 @@ impl Poller {
         Ok(())
     }
 
-    /// Sends a notification to wake up the current or next `wait()` call.
-    pub fn notify(&self) -> io::Result<()> {
-        #[cfg(feature = "tracing")]
-        let span = tracing::trace_span!(
-            "notify",
-            kqueue_fd = ?self.kqueue_fd.as_raw_fd(),
-        );
-        #[cfg(feature = "tracing")]
-        let _enter = span.enter();
-
-        self.notify.notify(self).ok();
-        Ok(())
+    /// Returns a waker that wakes up the current or next `wait()` call.
+    pub fn waker(&self) -> Waker {
+        self.notify.waker(self)
     }
+}
+
+/// Submit one or more changes to the kernel queue and check to see if they succeeded.
+fn submit_changes<A>(kqueue_fd: &OwnedFd, changelist: A) -> io::Result<()>
+where
+    A: Copy + AsRef<[kqueue::Event]> + AsMut<[kqueue::Event]>,
+{
+    let mut eventlist = Vec::with_capacity(changelist.as_ref().len());
+
+    // Apply changes.
+    unsafe {
+        kqueue::kevent_timespec(
+            kqueue_fd,
+            changelist.as_ref(),
+            spare_capacity(&mut eventlist),
+            None,
+        )?;
+    }
+
+    // Check for errors.
+    for &ev in &eventlist {
+        let data = ev.data();
+
+        // Explanation for ignoring EPIPE: https://github.com/tokio-rs/mio/issues/582
+        if (ev.flags().contains(kqueue::EventFlags::ERROR))
+            && data != 0
+            && data != Errno::NOENT.raw_os_error() as _
+            && data != Errno::PIPE.raw_os_error() as _
+        {
+            return Err(io::Error::from_raw_os_error(data as _));
+        }
+    }
+
+    Ok(())
 }
 
 impl AsRawFd for Poller {
@@ -554,12 +534,44 @@ mod notify {
     use std::io;
     #[cfg(feature = "tracing")]
     use std::os::unix::io::BorrowedFd;
+    use std::os::unix::io::OwnedFd;
+    use std::sync::Arc;
 
     /// A notification pipe.
     ///
     /// This implementation uses `EVFILT_USER` to avoid allocating a pipe.
     #[derive(Debug)]
     pub(super) struct Notify;
+
+    /// Wakes up the poller by triggering the `EVFILT_USER` event, can be used from any thread.
+    #[derive(Debug, Clone)]
+    pub struct Waker(Arc<OwnedFd>);
+
+    impl Waker {
+        /// Sends a notification to wake up the current or next `wait()` call.
+        pub fn notify(&self) -> io::Result<()> {
+            #[cfg(feature = "tracing")]
+            let span = tracing::trace_span!("notify", kqueue_fd = ?self.0);
+            #[cfg(feature = "tracing")]
+            let _enter = span.enter();
+
+            // Trigger the EVFILT_USER event.
+            super::submit_changes(
+                &self.0,
+                [kqueue::Event::new(
+                    kqueue::EventFilter::User {
+                        ident: 0,
+                        flags: kqueue::UserFlags::TRIGGER,
+                        user_flags: kqueue::UserDefinedFlags::new(0),
+                    },
+                    kqueue::EventFlags::ADD | kqueue::EventFlags::RECEIPT,
+                    crate::NOTIFY_KEY as _,
+                )],
+            )
+            .ok();
+            Ok(())
+        }
+    }
 
     impl Notify {
         /// Creates a new notification pipe.
@@ -587,20 +599,9 @@ mod notify {
             Ok(())
         }
 
-        /// Notifies the `Poller`.
-        pub(super) fn notify(&self, poller: &Poller) -> io::Result<()> {
-            // Trigger the EVFILT_USER event.
-            poller.submit_changes([kqueue::Event::new(
-                kqueue::EventFilter::User {
-                    ident: 0,
-                    flags: kqueue::UserFlags::TRIGGER,
-                    user_flags: kqueue::UserDefinedFlags::new(0),
-                },
-                kqueue::EventFlags::ADD | kqueue::EventFlags::RECEIPT,
-                crate::NOTIFY_KEY as _,
-            )])?;
-
-            Ok(())
+        /// Returns a waker for the `Poller`.
+        pub(super) fn waker(&self, poller: &Poller) -> Waker {
+            Waker(poller.kqueue_fd.clone())
         }
 
         /// Deregisters this notification pipe from the `Poller`.
@@ -640,6 +641,7 @@ mod notify {
         io::{AsFd, AsRawFd},
         net::UnixStream,
     };
+    use std::sync::Arc;
 
     /// A notification pipe.
     ///
@@ -649,8 +651,27 @@ mod notify {
         /// The read end of the pipe.
         read_stream: UnixStream,
 
-        /// The write end of the pipe.
-        write_stream: UnixStream,
+        /// The write end of the pipe, shared with the wakers.
+        write_stream: Arc<UnixStream>,
+    }
+
+    /// Wakes up the poller by writing to the pipe, can be used from any thread.
+    #[derive(Debug, Clone)]
+    pub struct Waker(Arc<UnixStream>);
+
+    impl Waker {
+        /// Sends a notification to wake up the current or next `wait()` call.
+        #[allow(clippy::unused_io_amount)]
+        pub fn notify(&self) -> io::Result<()> {
+            #[cfg(feature = "tracing")]
+            let span = tracing::trace_span!("notify", write_stream = ?self.0);
+            #[cfg(feature = "tracing")]
+            let _enter = span.enter();
+
+            // Write to the write end of the pipe
+            (&*self.0).write(&[1]).ok();
+            Ok(())
+        }
     }
 
     impl Notify {
@@ -662,7 +683,7 @@ mod notify {
 
             Ok(Self {
                 read_stream,
-                write_stream,
+                write_stream: Arc::new(write_stream),
             })
         }
 
@@ -691,13 +712,9 @@ mod notify {
             )
         }
 
-        /// Notifies the `Poller`.
-        #[allow(clippy::unused_io_amount)]
-        pub(super) fn notify(&self, _poller: &Poller) -> io::Result<()> {
-            // Write to the write end of the pipe
-            (&self.write_stream).write(&[1])?;
-
-            Ok(())
+        /// Returns a waker for the `Poller`.
+        pub(super) fn waker(&self, _poller: &Poller) -> Waker {
+            Waker(self.write_stream.clone())
         }
 
         /// Deregisters this notification pipe from the `Poller`.
