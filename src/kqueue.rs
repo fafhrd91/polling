@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::Instant;
 
 use rustix::buffer::spare_capacity;
@@ -28,6 +28,27 @@ pub struct Poller {
     /// On platforms that support `EVFILT_USER`, this uses that to wake up the poller. Otherwise, it
     /// uses a pipe.
     notify: notify::Notify,
+
+    /// Changes queued by `modify_deferred()`, submitted by the next `wait_deadline()`.
+    pending: Mutex<Changes>,
+
+    /// Changes being submitted by `wait_deadline()`, kept to reuse the allocation.
+    submit: Mutex<Changes>,
+}
+
+/// A list of changes for kqueue.
+#[derive(Default)]
+struct Changes(Vec<kqueue::Event>);
+
+// SAFETY: `udata` of the events is only used as an integer key.
+unsafe impl Send for Changes {}
+
+impl std::fmt::Debug for Changes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Changes")
+            .field("len", &self.0.len())
+            .finish()
+    }
 }
 
 /// Identifier for a source.
@@ -58,6 +79,8 @@ impl Poller {
             kqueue_fd,
             sources: RwLock::new(HashSet::new()),
             notify: notify::Notify::new()?,
+            pending: Mutex::new(Changes::default()),
+            submit: Mutex::new(Changes::default()),
         };
 
         // Register the notification pipe.
@@ -112,6 +135,20 @@ impl Poller {
 
         self.has_source(SourceId::Fd(fd.as_raw_fd()))?;
 
+        // Queued changes must not be applied after this one.
+        {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if !pending.0.is_empty() {
+                let raw = fd.as_raw_fd();
+                pending.0.retain(|ev| {
+                    !matches!(
+                        ev.filter(),
+                        kqueue::EventFilter::Read(f) | kqueue::EventFilter::Write(f) if f == raw
+                    )
+                });
+            }
+        }
+
         let mode_flags = mode_to_flags(mode);
 
         let read_flags = if ev.readable {
@@ -141,6 +178,45 @@ impl Poller {
 
         // Apply changes.
         self.submit_changes(changelist)
+    }
+
+    /// Queues a modification of an existing file descriptor, it is submitted by the next wait.
+    pub fn modify_deferred(&self, fd: BorrowedFd<'_>, ev: Event, mode: PollMode) -> io::Result<()> {
+        #[cfg(feature = "tracing")]
+        let span = tracing::trace_span!(
+            "modify_deferred",
+            kqueue_fd = ?self.kqueue_fd.as_raw_fd(),
+            ?fd,
+            ?ev,
+        );
+        #[cfg(feature = "tracing")]
+        let _enter = span.enter();
+
+        self.has_source(SourceId::Fd(fd.as_raw_fd()))?;
+
+        // Unwanted filters are disabled instead of deleted. Deleting a filter that does not
+        // exist fails, and any failed change makes `kevent` return without waiting.
+        let mode_flags = mode_to_flags(mode);
+        let flags = |wanted: bool| {
+            if wanted {
+                kqueue::EventFlags::ADD | kqueue::EventFlags::ENABLE | mode_flags
+            } else {
+                kqueue::EventFlags::ADD | kqueue::EventFlags::DISABLE | mode_flags
+            }
+        };
+
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.0.push(kqueue::Event::new(
+            kqueue::EventFilter::Read(fd.as_raw_fd()),
+            flags(ev.readable),
+            ev.key as _,
+        ));
+        pending.0.push(kqueue::Event::new(
+            kqueue::EventFilter::Write(fd.as_raw_fd()),
+            flags(ev.writable),
+            ev.key as _,
+        ));
+        Ok(())
     }
 
     /// Submit one or more changes to the kernel queue and check to see if they succeeded.
@@ -253,16 +329,32 @@ impl Poller {
             None => None,
         };
 
-        // Wait for I/O events.
-        let changelist = [];
-        let _res = unsafe {
+        // Take the queued changes.
+        let mut submit = self.submit.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::swap(&mut *pending, &mut *submit);
+        }
+
+        // A failed change is reported in the event list. If the list is full, `kevent` fails
+        // and stops applying changes, so make room for all of them.
+        let spare = events.list.capacity() - events.list.len();
+        if submit.0.len() > spare {
+            events.list.reserve(submit.0.len());
+        }
+
+        // Apply the changes and wait for I/O events.
+        let res = unsafe {
             kqueue::kevent_timespec(
                 &self.kqueue_fd,
-                &changelist,
+                &submit.0,
                 spare_capacity(&mut events.list),
                 timeout.as_ref(),
-            )?
+            )
         };
+        submit.0.clear();
+        drop(submit);
+        let _res = res?;
 
         #[cfg(feature = "tracing")]
         tracing::trace!(
@@ -339,20 +431,35 @@ impl Events {
         // event is reported as EVFILT_READ with the EV_EOF flag.
         //
         // https://github.com/golang/go/commit/23aad448b1e3f7c3b4ba2af90120bde91ac865b4
-        self.list.iter().map(|ev| Event {
-            key: ev.udata() as usize,
-            readable: matches!(
-                ev.filter(),
-                kqueue::EventFilter::Read(..)
-                    | kqueue::EventFilter::Vnode { .. }
-                    | kqueue::EventFilter::Proc { .. }
-                    | kqueue::EventFilter::Signal { .. }
-                    | kqueue::EventFilter::Timer { .. }
-            ),
-            writable: matches!(ev.filter(), kqueue::EventFilter::Write(..))
-                || (matches!(ev.filter(), kqueue::EventFilter::Read(..))
-                    && (ev.flags().intersects(kqueue::EventFlags::EOF))),
-            extra: EventExtra,
+        self.list.iter().filter_map(|ev| {
+            // Failed deferred change, report it so the failure surfaces on the next I/O.
+            if ev.flags().contains(kqueue::EventFlags::ERROR) {
+                let data = ev.data();
+                return if data == 0
+                    || data == Errno::NOENT.raw_os_error() as _
+                    || data == Errno::PIPE.raw_os_error() as _
+                {
+                    None
+                } else {
+                    Some(Event::all(ev.udata() as usize))
+                };
+            }
+
+            Some(Event {
+                key: ev.udata() as usize,
+                readable: matches!(
+                    ev.filter(),
+                    kqueue::EventFilter::Read(..)
+                        | kqueue::EventFilter::Vnode { .. }
+                        | kqueue::EventFilter::Proc { .. }
+                        | kqueue::EventFilter::Signal { .. }
+                        | kqueue::EventFilter::Timer { .. }
+                ),
+                writable: matches!(ev.filter(), kqueue::EventFilter::Write(..))
+                    || (matches!(ev.filter(), kqueue::EventFilter::Read(..))
+                        && (ev.flags().intersects(kqueue::EventFlags::EOF))),
+                extra: EventExtra,
+            })
         })
     }
 

@@ -277,6 +277,17 @@ impl Poller {
         Ok(())
     }
 
+    /// Update a source in the poller, IOCP applies it immediately.
+    #[inline]
+    pub(super) fn modify_deferred(
+        &self,
+        socket: BorrowedSocket<'_>,
+        interest: Event,
+        mode: PollMode,
+    ) -> io::Result<()> {
+        self.modify(socket, interest, mode)
+    }
+
     /// Delete a source from the poller.
     pub(super) fn delete(&self, socket: BorrowedSocket<'_>) -> io::Result<()> {
         #[cfg(feature = "tracing")]

@@ -176,6 +176,12 @@ impl Poller {
         })
     }
 
+    /// Modifies an existing file descriptor, `poll` applies it immediately.
+    #[inline]
+    pub fn modify_deferred(&self, fd: BorrowedFd<'_>, ev: Event, mode: PollMode) -> io::Result<()> {
+        self.modify(fd, ev, mode)
+    }
+
     /// Deletes a file descriptor.
     pub fn delete(&self, fd: BorrowedFd<'_>) -> io::Result<()> {
         if self.notify.has_fd(fd.as_raw_fd()) {

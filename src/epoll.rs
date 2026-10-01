@@ -2,6 +2,8 @@
 
 use std::io;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
+#[cfg(not(target_os = "redox"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[cfg(not(target_os = "redox"))]
@@ -34,7 +36,20 @@ pub struct Poller {
     /// Redox does not support timerfd.
     #[cfg(not(target_os = "redox"))]
     timer_fd: Option<OwnedFd>,
+
+    /// Whether the timerfd may be armed by a previous wait.
+    #[cfg(not(target_os = "redox"))]
+    timer_armed: AtomicBool,
 }
+
+/// Polling mode of the notifier.
+///
+/// An edge-triggered notifier stays armed, so a wait only reads it after it
+/// fired and never re-arms it. Redox keeps the oneshot registration.
+#[cfg(not(target_os = "redox"))]
+const NOTIFIER_MODE: PollMode = PollMode::Edge;
+#[cfg(target_os = "redox")]
+const NOTIFIER_MODE: PollMode = PollMode::Oneshot;
 
 impl Poller {
     /// Creates a new poller.
@@ -58,22 +73,26 @@ impl Poller {
             notifier,
             #[cfg(not(target_os = "redox"))]
             timer_fd,
+            #[cfg(not(target_os = "redox"))]
+            timer_armed: AtomicBool::new(false),
         };
 
         unsafe {
+            // The timer is edge-triggered, so arming it with `timerfd_settime`
+            // is enough and it never needs to be re-registered.
             #[cfg(not(target_os = "redox"))]
             if let Some(ref timer_fd) = poller.timer_fd {
                 poller.add(
                     timer_fd.as_raw_fd(),
-                    Event::none(crate::NOTIFY_KEY),
-                    PollMode::Oneshot,
+                    Event::readable(crate::NOTIFY_KEY),
+                    PollMode::Edge,
                 )?;
             }
 
             poller.add(
                 poller.notifier.as_fd().as_raw_fd(),
                 Event::readable(crate::NOTIFY_KEY),
-                PollMode::Oneshot,
+                NOTIFIER_MODE,
             )?;
         }
 
@@ -145,6 +164,12 @@ impl Poller {
         Ok(())
     }
 
+    /// Modifies an existing file descriptor, epoll applies it immediately.
+    #[inline]
+    pub fn modify_deferred(&self, fd: BorrowedFd<'_>, ev: Event, mode: PollMode) -> io::Result<()> {
+        self.modify(fd, ev, mode)
+    }
+
     /// Deletes a file descriptor.
     #[cfg_attr(not(feature = "tracing"), inline(always))]
     pub fn delete(&self, fd: BorrowedFd<'_>) -> io::Result<()> {
@@ -163,7 +188,6 @@ impl Poller {
     }
 
     /// Waits for I/O events with an optional deadline.
-    #[allow(clippy::needless_update)]
     pub fn wait_deadline(&self, events: &mut Events, deadline: Option<Instant>) -> io::Result<()> {
         #[cfg(feature = "tracing")]
         let span = tracing::trace_span!(
@@ -176,37 +200,26 @@ impl Poller {
 
         let timeout = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
 
+        // Only a positive timeout needs the timer, a zero timeout is passed to
+        // epoll directly.
         #[cfg(not(target_os = "redox"))]
-        let timer_fd = if timeout.is_some() {
-            if let Some(ref timer_fd) = self.timer_fd {
-                // Configure the timeout using timerfd.
-                let new_val = Itimerspec {
-                    it_interval: TS_ZERO,
-                    it_value: match timeout {
-                        None => TS_ZERO,
-                        Some(t) => {
-                            let mut ts = TS_ZERO;
-                            ts.tv_sec = t.as_secs() as _;
-                            ts.tv_nsec = t.subsec_nanos() as _;
-                            ts
-                        }
-                    },
-                    ..unsafe { std::mem::zeroed() }
-                };
-
-                timerfd_settime(timer_fd, TimerfdTimerFlags::empty(), &new_val)?;
-
-                // Set interest in timerfd.
-                self.modify(
-                    timer_fd.as_fd(),
-                    Event::readable(crate::NOTIFY_KEY),
-                    PollMode::Oneshot,
-                )?;
+        let timer_fd = match (&self.timer_fd, timeout) {
+            (Some(timer_fd), Some(t)) if !t.is_zero() => {
+                let mut it_value = TS_ZERO;
+                it_value.tv_sec = t.as_secs() as _;
+                it_value.tv_nsec = t.subsec_nanos() as _;
+                set_timer(timer_fd, it_value)?;
+                self.timer_armed.store(true, Ordering::Relaxed);
+                Some(timer_fd)
             }
-
-            &self.timer_fd
-        } else {
-            &None
+            (Some(timer_fd), _) => {
+                // A timer left armed by a previous wait would wake this one up.
+                if self.timer_armed.swap(false, Ordering::Relaxed) {
+                    set_timer(timer_fd, TS_ZERO)?;
+                }
+                None
+            }
+            (None, _) => None,
         };
 
         #[cfg(target_os = "redox")]
@@ -232,13 +245,28 @@ impl Poller {
             "new events",
         );
 
+        // Clear the notification, if received. The notifier is edge-triggered
+        // and stays armed. Each notification is a new edge, so one arriving
+        // after it is cleared is never lost.
+        #[cfg(not(target_os = "redox"))]
+        if events
+            .list
+            .iter()
+            .any(|ev| ev.data.u64() == crate::NOTIFY_KEY as u64)
+        {
+            self.notifier.clear();
+        }
+
         // Clear the notification (if received) and re-register interest in it.
-        self.notifier.clear();
-        self.modify(
-            self.notifier.as_fd(),
-            Event::readable(crate::NOTIFY_KEY),
-            PollMode::Oneshot,
-        )?;
+        #[cfg(target_os = "redox")]
+        {
+            self.notifier.clear();
+            self.modify(
+                self.notifier.as_fd(),
+                Event::readable(crate::NOTIFY_KEY),
+                NOTIFIER_MODE,
+            )?;
+        }
         Ok(())
     }
 
@@ -292,6 +320,19 @@ impl Drop for Poller {
 /// `timespec` value that equals zero.
 #[cfg(not(target_os = "redox"))]
 const TS_ZERO: Timespec = unsafe { std::mem::transmute([0u8; std::mem::size_of::<Timespec>()]) };
+
+/// Arms the timer to expire once after `it_value`, or disarms it if zero.
+#[cfg(not(target_os = "redox"))]
+#[allow(clippy::needless_update)]
+fn set_timer(timer_fd: &OwnedFd, it_value: Timespec) -> io::Result<()> {
+    let new_val = Itimerspec {
+        it_interval: TS_ZERO,
+        it_value,
+        ..unsafe { std::mem::zeroed() }
+    };
+    timerfd_settime(timer_fd, TimerfdTimerFlags::empty(), &new_val)?;
+    Ok(())
+}
 
 /// Get the EPOLL flags for the interest.
 fn epoll_flags(interest: &Event, mode: PollMode) -> epoll::EventFlags {

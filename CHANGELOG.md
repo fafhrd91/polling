@@ -1,3 +1,11 @@
+# Version 3.11.2
+
+- epoll: arm the timer only for a positive timeout and drop the notifier and
+  timer re-arm after every wait, reducing syscalls per wait.
+- Add `Poller::modify_deferred` and `Poller::modify_with_mode_deferred`, which
+  apply the change with the next wait.
+- kqueue: submit deferred changes with the wait call in a single `kevent`.
+
 # Version 3.11.0
 
 - Bump MSRV to 1.71. (#251)

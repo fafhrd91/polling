@@ -87,6 +87,12 @@ impl Poller {
         Ok(())
     }
 
+    /// Modifies an existing file descriptor, event ports apply it immediately.
+    #[inline]
+    pub fn modify_deferred(&self, fd: BorrowedFd<'_>, ev: Event, mode: PollMode) -> io::Result<()> {
+        self.modify(fd, ev, mode)
+    }
+
     /// Deletes a file descriptor.
     pub fn delete(&self, fd: BorrowedFd<'_>) -> io::Result<()> {
         #[cfg(feature = "tracing")]

@@ -708,6 +708,52 @@ impl Poller {
         self.poller.modify(source.source(), interest, mode)
     }
 
+    /// Modifies interest in a file descriptor or socket, possibly deferring the change to the
+    /// next wait.
+    ///
+    /// This is identical to [`modify()`][`Poller::modify()`], except that on kqueue the change
+    /// is queued and submitted by the next [`wait()`][`Poller::wait()`] together with its
+    /// `kevent` system call, rather than costing a system call of its own. Other platforms
+    /// apply the change immediately.
+    ///
+    /// See [`modify_with_mode_deferred()`][`Poller::modify_with_mode_deferred()`] for details.
+    pub fn modify_deferred(&self, source: impl AsSource, interest: Event) -> io::Result<()> {
+        self.modify_with_mode_deferred(source, interest, PollMode::Oneshot)
+    }
+
+    /// Modifies interest in a file descriptor or socket with the specified mode, possibly
+    /// deferring the change to the next wait.
+    ///
+    /// This is identical to [`modify_with_mode()`][`Poller::modify_with_mode()`], except that
+    /// on kqueue the change is queued and submitted by the next [`wait()`][`Poller::wait()`]
+    /// together with its `kevent` system call. Other platforms apply the change immediately.
+    ///
+    /// A queued change takes effect when the next wait starts, a wait that is already blocked
+    /// does not see it. This is intended to be called from the thread that waits.
+    ///
+    /// On kqueue a filter that is not wanted is disabled rather than deleted, and keeps the mode
+    /// it was created with, so a source should keep using the same mode.
+    ///
+    /// # Errors
+    ///
+    /// Only errors detected before the change is queued are returned, such as an unknown
+    /// source. If the kernel rejects a queued change, the source is reported as both readable
+    /// and writable, so that the failure surfaces on its next read or write.
+    pub fn modify_with_mode_deferred(
+        &self,
+        source: impl AsSource,
+        interest: Event,
+        mode: PollMode,
+    ) -> io::Result<()> {
+        if interest.key == NOTIFY_KEY {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the key is not allowed to be `usize::MAX`",
+            ));
+        }
+        self.poller.modify_deferred(source.source(), interest, mode)
+    }
+
     /// Removes a file descriptor or socket from the poller.
     ///
     /// Unlike [`add()`][`Poller::add()`], this method only removes the file descriptor or
