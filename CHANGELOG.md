@@ -1,4 +1,4 @@
-# Version 3.11.2
+# Version 4.0.0
 
 - epoll: arm the timer only for a positive timeout and drop the notifier and
   timer re-arm after every wait, reducing syscalls per wait.
