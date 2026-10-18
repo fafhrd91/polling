@@ -265,6 +265,30 @@ fn edge_oneshot_triggered() {
     );
 }
 
+#[test]
+fn rejected_mode_keeps_registration() -> io::Result<()> {
+    let poller = Poller::new()?;
+    if poller.supports_edge() {
+        return Ok(());
+    }
+
+    let (reader, mut writer) = tcp_pair()?;
+    unsafe { poller.add_with_mode(&reader, Event::none(1), PollMode::Oneshot)? };
+
+    let err = poller
+        .modify_with_mode(&reader, Event::readable(2), PollMode::Edge)
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+    // the rejected interest must not be applied
+    writer.write_all(&[1])?;
+    let mut events = Events::new();
+    poller.wait(&mut events, Some(Duration::from_millis(100)))?;
+    assert!(events.is_empty());
+
+    poller.delete(&reader)
+}
+
 fn tcp_pair() -> io::Result<(TcpStream, TcpStream)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let a = TcpStream::connect(listener.local_addr()?)?;

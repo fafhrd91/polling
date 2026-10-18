@@ -79,7 +79,7 @@ jobs:
           # Note: This cfg is intended to make it easy for polling developers to test
           # the backend that uses poll, and is not a public API.
           RUSTFLAGS: ${{ env.RUSTFLAGS }} --cfg polling_test_poll_backend
-        if: startsWith(matrix.os, 'ubuntu')
+        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
       - run: cargo test
         env:
           # Note: This cfg is intended to make it easy for polling developers to test
@@ -137,6 +137,11 @@ jobs:
       run: |
         rustup target add x86_64-unknown-illumos
         cargo build --target x86_64-unknown-illumos
+    - name: Solaris
+      if: startsWith(matrix.os, 'ubuntu')
+      run: |
+        rustup target add x86_64-pc-solaris
+        cargo check --target x86_64-pc-solaris
     - name: Redox
       if: startsWith(matrix.rust, 'nightly') && startsWith(matrix.os, 'ubuntu')
       run: |

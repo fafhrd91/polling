@@ -152,6 +152,23 @@ fn append_events() {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn rd_interrupt_without_readiness() -> io::Result<()> {
+    let poller = Poller::new()?;
+    let (reader, writer) = tcp_pair()?;
+    unsafe { poller.add(&reader, Event::none(1).with_rd_interrupt())? };
+
+    writer.shutdown(std::net::Shutdown::Write)?;
+    let mut events = Events::new();
+    poller.wait(&mut events, Some(Duration::from_secs(5)))?;
+    let ev = events.iter().next().expect("rd interrupt is not reported");
+    assert_eq!(ev.key, 1);
+    assert!(ev.is_rd_interrupt());
+
+    poller.delete(&reader)
+}
+
 fn tcp_pair() -> io::Result<(TcpStream, TcpStream)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let a = TcpStream::connect(listener.local_addr()?)?;
