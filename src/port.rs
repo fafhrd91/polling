@@ -76,6 +76,7 @@ impl Poller {
         if ev.writable {
             flags |= write_flags();
         }
+        flags |= ev.extra.flags;
 
         if mode != PollMode::Oneshot {
             return Err(crate::unsupported_error(
@@ -206,6 +207,12 @@ fn write_flags() -> PollFlags {
     PollFlags::OUT | PollFlags::HUP | PollFlags::ERR
 }
 
+/// `POLLRDHUP`, empty on platforms that don't have it.
+#[cfg(target_os = "illumos")]
+const RDHUP: PollFlags = PollFlags::RDHUP;
+#[cfg(not(target_os = "illumos"))]
+const RDHUP: PollFlags = PollFlags::empty();
+
 /// A list of reported I/O events.
 pub struct Events {
     list: Vec<port::Event>,
@@ -270,7 +277,7 @@ impl EventExtra {
     /// Set the interrupt flag.
     #[inline]
     pub fn set_rd_hup(&mut self, value: bool) {
-        self.flags.set(PollFlags::RDHUP, value);
+        self.flags.set(RDHUP, value);
     }
 
     /// Set the priority flag.
@@ -288,7 +295,7 @@ impl EventExtra {
     /// Is this an rd interrupt event?
     #[inline]
     pub fn is_rd_hup(&self) -> bool {
-        self.flags.contains(PollFlags::RDHUP)
+        self.flags.intersects(RDHUP)
     }
 
     /// Is this a priority event?

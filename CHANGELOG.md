@@ -5,6 +5,11 @@
   it can be added again.
 - kqueue: `add_filter` and `modify_filter` reject the reserved key `usize::MAX`
   with `InvalidInput`; events registered with it were silently dropped.
+- poll, event ports: interest flags set with `set_interrupt`, `set_rd_interrupt` and
+  `set_priority` are passed to the OS, `Event::none` with them was never reported.
+- poll: a `modify` rejected for an unsupported mode no longer changes the registration.
+- poll, event ports: `set_rd_interrupt` is a no-op where `POLLRDHUP` is not available,
+  fixes builds for Solaris, Fuchsia, Hermit, Haiku and the poll backend on macOS.
 
 # Version 4.0.0
 

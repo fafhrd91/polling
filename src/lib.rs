@@ -251,9 +251,9 @@ impl Event {
     /// Interruption events are only supported on the following platforms:
     ///
     /// - `epoll`
-    /// - `poll`
+    /// - `poll` on Linux, Android, FreeBSD and illumos
     /// - IOCP
-    /// - Event Ports
+    /// - Event Ports on illumos
     ///
     /// On other platforms, this function is a no-op.
     #[inline]
@@ -288,9 +288,9 @@ impl Event {
     /// Interruption events are only supported on the following platforms:
     ///
     /// - `epoll`
-    /// - `poll`
+    /// - `poll` on Linux, Android, FreeBSD and illumos
     /// - IOCP
-    /// - Event Ports
+    /// - Event Ports on illumos
     ///
     /// On other platforms, this function is a no-op.
     #[inline]

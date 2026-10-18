@@ -145,12 +145,14 @@ impl Poller {
         #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
+        let remove = cvt_mode_as_remove(mode)?;
         self.modify_fds(|fds| {
             let data = fds
                 .fd_data
                 .get_mut(&fd.as_raw_fd())
                 .ok_or(io::ErrorKind::NotFound)?;
             data.key = ev.key;
+            data.remove = remove;
             let poll_fds_index = data.poll_fds_index;
 
             // SAFETY: This is essentially transmuting a `PollFd<'a>` to a `PollFd<'static>`, which
@@ -159,7 +161,6 @@ impl Poller {
                 unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) },
                 poll_events(ev),
             );
-            data.remove = cvt_mode_as_remove(mode)?;
 
             Ok(())
         })
@@ -300,8 +301,28 @@ fn poll_events(ev: Event) -> PollFlags {
         PollFlags::OUT | PollFlags::WRBAND
     } else {
         PollFlags::empty()
-    })
+    }) | ev.extra.flags
 }
+
+/// `POLLRDHUP`, empty on platforms that don't have it.
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "illumos",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(target_arch = "sparc", target_arch = "sparc64"))
+    ),
+))]
+const RDHUP: PollFlags = PollFlags::RDHUP;
+#[cfg(not(any(
+    target_os = "freebsd",
+    target_os = "illumos",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(target_arch = "sparc", target_arch = "sparc64"))
+    ),
+)))]
+const RDHUP: PollFlags = PollFlags::empty();
 
 /// Returned poll events for reading.
 fn read_events() -> PollFlags {
@@ -367,7 +388,7 @@ impl EventExtra {
     /// Set the rd interrupt flag.
     #[inline]
     pub fn set_rd_hup(&mut self, value: bool) {
-        self.flags.set(PollFlags::RDHUP, value);
+        self.flags.set(RDHUP, value);
     }
 
     /// Set the priority flag.
@@ -385,7 +406,7 @@ impl EventExtra {
     /// Is this an rd interrupt event?
     #[inline]
     pub fn is_rd_hup(&self) -> bool {
-        self.flags.contains(PollFlags::RDHUP)
+        self.flags.intersects(RDHUP)
     }
 
     /// Is this a priority event?
@@ -628,9 +649,15 @@ mod notify {
     use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
     use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
     use rustix::io::{fcntl_getfd, fcntl_setfd, read, write, FdFlags};
-    #[cfg(not(any(target_os = "haiku", target_os = "nto")))]
-    use rustix::pipe::pipe_with;
-    use rustix::pipe::{pipe, PipeFlags};
+    use rustix::pipe::pipe;
+    #[cfg(not(any(
+        target_vendor = "apple",
+        target_os = "aix",
+        target_os = "haiku",
+        target_os = "horizon",
+        target_os = "nto"
+    )))]
+    use rustix::pipe::{pipe_with, PipeFlags};
 
     /// A notification pipe.
     ///
@@ -649,18 +676,31 @@ mod notify {
     impl Notify {
         /// Creates a new notification pipe.
         pub(super) fn new() -> io::Result<Self> {
-            let fallback_pipe = |_| {
+            let fallback_pipe = || {
                 let (read_pipe, write_pipe) = pipe()?;
                 fcntl_setfd(&read_pipe, fcntl_getfd(&read_pipe)? | FdFlags::CLOEXEC)?;
                 fcntl_setfd(&write_pipe, fcntl_getfd(&write_pipe)? | FdFlags::CLOEXEC)?;
                 io::Result::Ok((read_pipe, write_pipe))
             };
 
-            #[cfg(not(any(target_os = "haiku", target_os = "nto")))]
-            let (read_pipe, write_pipe) = pipe_with(PipeFlags::CLOEXEC).or_else(fallback_pipe)?;
+            #[cfg(not(any(
+                target_vendor = "apple",
+                target_os = "aix",
+                target_os = "haiku",
+                target_os = "horizon",
+                target_os = "nto"
+            )))]
+            let (read_pipe, write_pipe) =
+                pipe_with(PipeFlags::CLOEXEC).or_else(|_| fallback_pipe())?;
 
-            #[cfg(any(target_os = "haiku", target_os = "nto"))]
-            let (read_pipe, write_pipe) = fallback_pipe(PipeFlags::CLOEXEC)?;
+            #[cfg(any(
+                target_vendor = "apple",
+                target_os = "aix",
+                target_os = "haiku",
+                target_os = "horizon",
+                target_os = "nto"
+            ))]
+            let (read_pipe, write_pipe) = fallback_pipe()?;
 
             // Put the reading side into non-blocking mode.
             fcntl_setfl(&read_pipe, fcntl_getfl(&read_pipe)? | OFlags::NONBLOCK)?;
