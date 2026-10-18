@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use easy_parallel::Parallel;
-use polling::{Event, Events, Poller};
+use ntex_polling::{Event, Events, Poller};
 
 #[test]
 fn concurrent_interruption() -> io::Result<()> {

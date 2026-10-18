@@ -31,7 +31,7 @@ Only one thread can be waiting for I/O events at a time.
 ## Examples
 
 ```rust,no_run
-use polling::{Event, Poller};
+use ntex_polling::{Event, Poller};
 use std::net::TcpListener;
 
 // Create a TCP listener.

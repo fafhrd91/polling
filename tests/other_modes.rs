@@ -6,7 +6,7 @@ use std::io::{self, prelude::*};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-use polling::{Event, Events, PollMode, Poller};
+use ntex_polling::{Event, Events, PollMode, Poller};
 
 #[test]
 fn level_triggered() {

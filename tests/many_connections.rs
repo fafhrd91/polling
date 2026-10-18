@@ -7,7 +7,7 @@ use std::io::{self, prelude::*};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-use polling::Events;
+use ntex_polling::Events;
 
 #[test]
 fn many_connections() {
@@ -19,11 +19,13 @@ fn many_connections() {
     }
 
     // Create a poller and add all the connections.
-    let poller = polling::Poller::new().unwrap();
+    let poller = ntex_polling::Poller::new().unwrap();
 
     for (i, reader, _) in connections.iter() {
         unsafe {
-            poller.add(reader, polling::Event::readable(*i)).unwrap();
+            poller
+                .add(reader, ntex_polling::Event::readable(*i))
+                .unwrap();
         }
     }
 
@@ -46,7 +48,7 @@ fn many_connections() {
         assert_eq!(current_events.len(), 1, "events: {current_events:?}");
         assert_eq!(
             current_events[0].with_no_extra(),
-            polling::Event::readable(id)
+            ntex_polling::Event::readable(id)
         );
 
         // Read the byte from the connection.

@@ -1,7 +1,7 @@
 use std::io;
 use std::net::TcpListener;
 
-use polling::{Event, Events, Poller};
+use ntex_polling::{Event, Events, Poller};
 
 fn main() -> io::Result<()> {
     let l1 = TcpListener::bind("127.0.0.1:8001")?;
