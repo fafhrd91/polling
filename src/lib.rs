@@ -795,8 +795,9 @@ impl Poller {
 
     /// Waits for at least one I/O event and returns the number of new events.
     ///
-    /// New events will be appended to `events`. If necessary, make sure to clear the
-    /// [`Events`][Events::clear()] before calling [`wait()`][`Poller::wait()`]!
+    /// New events will be appended to `events`, which grows if it has no room for them. If
+    /// necessary, make sure to clear the [`Events`][Events::clear()] before calling
+    /// [`wait()`][`Poller::wait()`]!
     ///
     /// This method will return with no new events if a notification is delivered by the
     /// [`notify()`] method or a [`Notifier`], or the timeout is reached. Sometimes it may even
@@ -848,12 +849,14 @@ impl Poller {
         #[cfg(feature = "tracing")]
         let _enter = span.enter();
 
+        let before = events.len();
+
         loop {
             // Wait for I/O events.
             if let Err(e) = self.poller.wait_deadline(&mut events.events, deadline) {
-                // If the wait was interrupted by a signal, clear events and try again.
+                // If the wait was interrupted by a signal, try again. A failed wait does not
+                // append events, so events from earlier calls are kept.
                 if e.kind() == io::ErrorKind::Interrupted {
-                    events.clear();
                     continue;
                 } else {
                     return Err(e);
@@ -863,8 +866,8 @@ impl Poller {
             // Clear the notification, if any.
             self.notifier.0.notified.swap(false, Ordering::SeqCst);
 
-            // Indicate number of events.
-            return Ok(events.len());
+            // Indicate number of new events.
+            return Ok(events.len() - before);
         }
     }
 

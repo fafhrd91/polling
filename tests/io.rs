@@ -129,8 +129,8 @@ fn append_events() {
     }
 
     // Trigger read events on the sockets and reuse the event list to test
-    // that events are appended.
-    let mut events = Events::new();
+    // that events are appended, a full list still receives new events.
+    let mut events = Events::with_capacity(std::num::NonZeroUsize::MIN);
 
     for (index, (_read, ref mut write)) in pairs.iter_mut().enumerate() {
         // Write to the socket prompting a reader readiness event.
@@ -139,7 +139,7 @@ fn append_events() {
             poller
                 .wait(&mut events, Some(Duration::from_secs(1)))
                 .unwrap(),
-            index + 1
+            1
         );
         assert_eq!(events.len(), index + 1);
         for event in events.iter() {
@@ -167,6 +167,45 @@ fn rd_interrupt_without_readiness() -> io::Result<()> {
     assert!(ev.is_rd_interrupt());
 
     poller.delete(&reader)
+}
+
+#[test]
+fn wait_counts_new_events_after_earlier_ones() {
+    let poller = Poller::new().unwrap();
+    let mut pairs = Vec::new();
+    for key in 0..3 {
+        let (read, write) = tcp_pair().unwrap();
+        unsafe {
+            poller.add(&read, Event::readable(key)).unwrap();
+        }
+        pairs.push((read, write));
+    }
+
+    let mut events = Events::new();
+    pairs[0].1.write_all(&[1]).unwrap();
+    assert_eq!(
+        poller
+            .wait(&mut events, Some(Duration::from_secs(1)))
+            .unwrap(),
+        1
+    );
+
+    pairs[1].1.write_all(&[1]).unwrap();
+    pairs[2].1.write_all(&[1]).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        poller
+            .wait(&mut events, Some(Duration::from_secs(1)))
+            .unwrap(),
+        2
+    );
+    let mut keys: Vec<_> = events.iter().map(|ev| ev.key).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, [0, 1, 2]);
+
+    for (read, _write) in &pairs {
+        poller.delete(read).unwrap();
+    }
 }
 
 fn tcp_pair() -> io::Result<(TcpStream, TcpStream)> {

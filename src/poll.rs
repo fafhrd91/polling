@@ -235,6 +235,7 @@ impl Poller {
         // Store the events if there were any.
         if num_fd_events > 0 {
             events.inner.reserve(num_fd_events);
+            let mut stored = 0;
             for fd_data in fds.fd_data.values_mut() {
                 let poll_fd = &mut fds.poll_fds[fd_data.poll_fds_index];
                 if !poll_fd.revents().is_empty() {
@@ -254,7 +255,8 @@ impl Poller {
                         );
                     }
 
-                    if events.inner.len() == num_fd_events {
+                    stored += 1;
+                    if stored == num_fd_events {
                         break;
                     }
                 }

@@ -10,6 +10,8 @@
 - poll: a `modify` rejected for an unsupported mode no longer changes the registration.
 - poll, event ports: `set_rd_interrupt` is a no-op where `POLLRDHUP` is not available,
   fixes builds for Solaris, Fuchsia, Hermit, Haiku and the poll backend on macOS.
+- `wait` returns the number of newly appended events, a full `Events` grows to receive
+  new events, and events kept from earlier calls are not dropped on `EINTR`.
 
 # Version 4.0.0
 
