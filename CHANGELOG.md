@@ -3,6 +3,8 @@
 - kqueue: submit immediate changes and wakeups without a heap allocation.
 - kqueue: a source whose `add` or `add_filter` fails is no longer left registered,
   it can be added again.
+- kqueue: `add_filter` and `modify_filter` reject the reserved key `usize::MAX`
+  with `InvalidInput`; events registered with it were silently dropped.
 
 # Version 4.0.0
 

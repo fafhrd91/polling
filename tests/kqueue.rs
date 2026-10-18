@@ -18,7 +18,7 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use ntex_polling::os::kqueue::{PollerKqueueExt, Process, ProcessOps};
+use ntex_polling::os::kqueue::{PollerKqueueExt, Process, ProcessOps, Timer};
 use ntex_polling::{Event, Events, PollMode, Poller};
 
 struct Counting;
@@ -98,4 +98,36 @@ fn failed_add_filter_is_not_registered() -> io::Result<()> {
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
     Ok(())
+}
+
+#[test]
+fn filter_reserved_key_is_rejected() -> io::Result<()> {
+    let poller = Poller::new()?;
+    let timer = Timer {
+        id: 1,
+        timeout: Duration::from_millis(1),
+    };
+
+    let err = poller
+        .add_filter(timer, usize::MAX, PollMode::Oneshot)
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+    // the rejected filter was not registered
+    let err = poller
+        .modify_filter(timer, 1, PollMode::Oneshot)
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+    poller.add_filter(timer, 1, PollMode::Oneshot)?;
+    let err = poller
+        .modify_filter(timer, usize::MAX, PollMode::Oneshot)
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+    // the original key is still delivered
+    let mut events = Events::new();
+    poller.wait(&mut events, Some(Duration::from_secs(5)))?;
+    assert_eq!(events.iter().map(|ev| ev.key).collect::<Vec<_>>(), [1]);
+    poller.delete_filter(timer)
 }

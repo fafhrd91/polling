@@ -1,7 +1,7 @@
 //! Functionality that is only available for `kqueue`-based platforms.
 
 use crate::sys::{mode_to_flags, SourceId};
-use crate::{PollMode, Poller};
+use crate::{PollMode, Poller, NOTIFY_KEY};
 
 use std::io;
 use std::marker::PhantomData;
@@ -29,6 +29,9 @@ pub trait PollerKqueueExt<F: Filter>: PollerSealed {
     /// This is similar to [`add`][Poller::add], but it allows you to specify a filter instead of
     /// a socket. See the implementors of the [`Filter`] trait for more information.
     ///
+    /// Returns an [`InvalidInput`](io::ErrorKind::InvalidInput) error if `key` equals
+    /// `usize::MAX` because that key is reserved for internal use.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -51,6 +54,9 @@ pub trait PollerKqueueExt<F: Filter>: PollerSealed {
     ///
     /// This is similar to [`modify`][Poller::modify], but it allows you to specify a filter
     /// instead of a socket. See the implementors of the [`Filter`] trait for more information.
+    ///
+    /// Returns an [`InvalidInput`](io::ErrorKind::InvalidInput) error if `key` equals
+    /// `usize::MAX` because that key is reserved for internal use.
     ///
     /// # Examples
     ///
@@ -98,6 +104,8 @@ pub trait PollerKqueueExt<F: Filter>: PollerSealed {
 impl<F: Filter> PollerKqueueExt<F> for Poller {
     #[inline(always)]
     fn add_filter(&self, filter: F, key: usize, mode: PollMode) -> io::Result<()> {
+        check_key(key)?;
+
         // No difference between adding and modifying in kqueue.
         let source = filter.source_id();
         self.poller.add_source(source)?;
@@ -108,6 +116,7 @@ impl<F: Filter> PollerKqueueExt<F> for Poller {
     }
 
     fn modify_filter(&self, filter: F, key: usize, mode: PollMode) -> io::Result<()> {
+        check_key(key)?;
         self.poller.has_source(filter.source_id())?;
 
         // Convert the filter into a kevent.
@@ -125,6 +134,17 @@ impl<F: Filter> PollerKqueueExt<F> for Poller {
         self.poller.submit_changes([event])?;
 
         self.poller.remove_source(filter.source_id())
+    }
+}
+
+fn check_key(key: usize) -> io::Result<()> {
+    if key == NOTIFY_KEY {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the key is not allowed to be `usize::MAX`",
+        ))
+    } else {
+        Ok(())
     }
 }
 
