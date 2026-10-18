@@ -1,4 +1,4 @@
-use polling::{Event, Events, Poller};
+use ntex_polling::{Event, Events, Poller};
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;

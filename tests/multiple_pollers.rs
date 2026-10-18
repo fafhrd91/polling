@@ -1,6 +1,6 @@
 //! Test registering one source into multiple pollers.
 
-use polling::{Event, Events, PollMode, Poller};
+use ntex_polling::{Event, Events, PollMode, Poller};
 
 use std::io::{self, prelude::*};
 use std::net::{TcpListener, TcpStream};

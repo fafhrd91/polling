@@ -2,8 +2,8 @@
 
 #![cfg(windows)]
 
-use polling::os::iocp::{CompletionPacket, NotifierIocpExt, PollerIocpExt};
-use polling::{Event, Events, Poller};
+use ntex_polling::os::iocp::{CompletionPacket, NotifierIocpExt, PollerIocpExt};
+use ntex_polling::{Event, Events, Poller};
 
 use std::thread;
 use std::time::Duration;

@@ -19,7 +19,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! use polling::{Event, Events, Poller};
+//! use ntex_polling::{Event, Events, Poller};
 //! use std::net::TcpListener;
 //!
 //! // Create a TCP listener.
@@ -388,12 +388,12 @@ impl Event {
     /// ```
     /// use std::{io, net};
     /// // Assuming polling and socket2 are included as dependencies in Cargo.toml
-    /// use polling::Event;
+    /// use ntex_polling::Event;
     /// use socket2::Type;
     ///
     /// fn main() -> io::Result<()> {
     ///     let socket = socket2::Socket::new(socket2::Domain::IPV4, Type::STREAM, None)?;
-    ///     let poller = polling::Poller::new()?;
+    ///     let poller = ntex_polling::Poller::new()?;
     ///     unsafe {
     ///         poller.add(&socket, Event::new(0, true, true))?;
     ///     }
@@ -401,7 +401,7 @@ impl Event {
     ///     socket.set_nonblocking(true)?;
     ///     let _ = socket.connect(&addr.into());
     ///
-    ///     let mut events = polling::Events::new();
+    ///     let mut events = ntex_polling::Events::new();
     ///
     ///     events.clear();
     ///     poller.wait(&mut events, None)?;
@@ -492,7 +492,7 @@ impl Poller {
     /// # Examples
     ///
     /// ```
-    /// use polling::Poller;
+    /// use ntex_polling::Poller;
     ///
     /// let poller = Poller::new()?;
     /// # std::io::Result::Ok(())
@@ -568,7 +568,7 @@ impl Poller {
     /// Set interest in all events:
     ///
     /// ```no_run
-    /// use polling::{Event, Poller};
+    /// use ntex_polling::{Event, Poller};
     ///
     /// let source = std::net::TcpListener::bind("127.0.0.1:0")?;
     /// source.set_nonblocking(true)?;
@@ -639,7 +639,7 @@ impl Poller {
     /// To enable interest in all events:
     ///
     /// ```no_run
-    /// # use polling::{Event, Poller};
+    /// # use ntex_polling::{Event, Poller};
     /// # let source = std::net::TcpListener::bind("127.0.0.1:0")?;
     /// # let key = 7;
     /// # let poller = Poller::new()?;
@@ -651,7 +651,7 @@ impl Poller {
     /// To enable interest in readable events and disable interest in writable events:
     ///
     /// ```no_run
-    /// # use polling::{Event, Poller};
+    /// # use ntex_polling::{Event, Poller};
     /// # let source = std::net::TcpListener::bind("127.0.0.1:0")?;
     /// # let key = 7;
     /// # let poller = Poller::new()?;
@@ -664,7 +664,7 @@ impl Poller {
     /// To disable interest in readable events and enable interest in writable events:
     ///
     /// ```no_run
-    /// # use polling::{Event, Poller};
+    /// # use ntex_polling::{Event, Poller};
     /// # let poller = Poller::new()?;
     /// # let key = 7;
     /// # let source = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -677,7 +677,7 @@ impl Poller {
     /// To disable interest in all events:
     ///
     /// ```no_run
-    /// # use polling::{Event, Poller};
+    /// # use ntex_polling::{Event, Poller};
     /// # let source = std::net::TcpListener::bind("127.0.0.1:0")?;
     /// # let key = 7;
     /// # let poller = Poller::new()?;
@@ -777,7 +777,7 @@ impl Poller {
     /// # Examples
     ///
     /// ```
-    /// use polling::{Event, Poller};
+    /// use ntex_polling::{Event, Poller};
     /// use std::net::TcpListener;
     ///
     /// let socket = TcpListener::bind("127.0.0.1:0")?;
@@ -810,7 +810,7 @@ impl Poller {
     /// # Examples
     ///
     /// ```
-    /// use polling::{Event, Events, Poller};
+    /// use ntex_polling::{Event, Events, Poller};
     /// use std::net::TcpListener;
     /// use std::time::Duration;
     ///
@@ -873,7 +873,7 @@ impl Poller {
     /// # Examples
     ///
     /// ```
-    /// use polling::{Events, Poller};
+    /// use ntex_polling::{Events, Poller};
     /// use std::thread;
     ///
     /// let poller = Poller::new()?;
@@ -903,7 +903,7 @@ impl Poller {
     /// # Examples
     ///
     /// ```
-    /// use polling::{Events, Poller};
+    /// use ntex_polling::{Events, Poller};
     ///
     /// let poller = Poller::new()?;
     ///
@@ -989,7 +989,7 @@ impl Events {
     /// # Examples
     ///
     /// ```
-    /// use polling::Events;
+    /// use ntex_polling::Events;
     ///
     /// let events = Events::new();
     /// ```
@@ -1010,7 +1010,7 @@ impl Events {
     /// # Examples
     ///
     /// ```
-    /// use polling::Events;
+    /// use ntex_polling::Events;
     /// use std::num::NonZeroUsize;
     ///
     /// let capacity = NonZeroUsize::new(1024).unwrap();
@@ -1031,7 +1031,7 @@ impl Events {
     /// # Examples
     ///
     /// ```
-    /// use polling::{Event, Events, Poller};
+    /// use ntex_polling::{Event, Events, Poller};
     /// use std::time::Duration;
     ///
     /// # fn main() -> std::io::Result<()> {
@@ -1052,7 +1052,7 @@ impl Events {
     /// # Examples
     ///
     /// ```no_run
-    /// use polling::{Event, Events, Poller};
+    /// use ntex_polling::{Event, Events, Poller};
     ///
     /// # fn main() -> std::io::Result<()> {
     /// let poller = Poller::new()?;
@@ -1075,7 +1075,7 @@ impl Events {
     /// # Examples
     ///
     /// ```
-    /// use polling::Events;
+    /// use ntex_polling::Events;
     ///
     /// let events = Events::new();
     /// assert_eq!(events.len(), 0);
@@ -1090,7 +1090,7 @@ impl Events {
     /// # Examples
     ///
     /// ```
-    /// use polling::Events;
+    /// use ntex_polling::Events;
     ///
     /// let events = Events::new();
     /// assert!(events.is_empty());
@@ -1105,7 +1105,7 @@ impl Events {
     /// # Examples
     ///
     /// ```
-    /// use polling::Events;
+    /// use ntex_polling::Events;
     /// use std::num::NonZeroUsize;
     ///
     /// let cap = NonZeroUsize::new(10).unwrap();

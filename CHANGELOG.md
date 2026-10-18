@@ -1,3 +1,7 @@
+# Version 4.1.0 (Unreleased)
+
+- kqueue: submit immediate changes and wakeups without a heap allocation.
+
 # Version 4.0.0
 
 - epoll: arm the timer only for a positive timeout and drop the notifier and

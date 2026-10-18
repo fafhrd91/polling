@@ -1,11 +1,11 @@
 use std::{io, net};
 
-use polling::Event;
+use ntex_polling::Event;
 use socket2::Type;
 
 fn main() -> io::Result<()> {
     let socket = socket2::Socket::new(socket2::Domain::IPV4, Type::STREAM, None)?;
-    let poller = polling::Poller::new()?;
+    let poller = ntex_polling::Poller::new()?;
     unsafe {
         poller.add(&socket, Event::new(0, true, true))?;
     }
@@ -13,7 +13,7 @@ fn main() -> io::Result<()> {
     socket.set_nonblocking(true)?;
     let _ = socket.connect(&addr.into());
 
-    let mut events = polling::Events::new();
+    let mut events = ntex_polling::Events::new();
 
     events.clear();
     poller.wait(&mut events, None)?;

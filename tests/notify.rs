@@ -3,8 +3,8 @@ use std::thread;
 use std::time::Duration;
 
 use easy_parallel::Parallel;
-use polling::Events;
-use polling::Poller;
+use ntex_polling::Events;
+use ntex_polling::Poller;
 
 #[test]
 fn simple() -> io::Result<()> {

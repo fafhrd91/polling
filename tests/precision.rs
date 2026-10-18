@@ -1,7 +1,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use polling::{Events, Poller};
+use ntex_polling::{Events, Poller};
 
 #[test]
 fn below_ms() -> io::Result<()> {

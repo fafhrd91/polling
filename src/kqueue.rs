@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io;
+use std::mem::MaybeUninit;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::sync::Arc;
 use std::time::Instant;
@@ -223,10 +224,10 @@ impl Poller {
     }
 
     /// Submit one or more changes to the kernel queue and check to see if they succeeded.
-    pub(crate) fn submit_changes<A>(&self, changelist: A) -> io::Result<()>
-    where
-        A: Copy + AsRef<[kqueue::Event]> + AsMut<[kqueue::Event]>,
-    {
+    pub(crate) fn submit_changes<const N: usize>(
+        &self,
+        changelist: [kqueue::Event; N],
+    ) -> io::Result<()> {
         submit_changes(&self.kqueue_fd, changelist)
     }
 
@@ -331,24 +332,18 @@ impl Poller {
 }
 
 /// Submit one or more changes to the kernel queue and check to see if they succeeded.
-fn submit_changes<A>(kqueue_fd: &OwnedFd, changelist: A) -> io::Result<()>
-where
-    A: Copy + AsRef<[kqueue::Event]> + AsMut<[kqueue::Event]>,
-{
-    let mut eventlist = Vec::with_capacity(changelist.as_ref().len());
+fn submit_changes<const N: usize>(
+    kqueue_fd: &OwnedFd,
+    changelist: [kqueue::Event; N],
+) -> io::Result<()> {
+    let mut eventlist = [MaybeUninit::<kqueue::Event>::uninit(); N];
 
     // Apply changes.
-    unsafe {
-        kqueue::kevent_timespec(
-            kqueue_fd,
-            changelist.as_ref(),
-            spare_capacity(&mut eventlist),
-            None,
-        )?;
-    }
+    let (eventlist, _) =
+        unsafe { kqueue::kevent_timespec(kqueue_fd, &changelist, &mut eventlist, None)? };
 
     // Check for errors.
-    for &ev in &eventlist {
+    for &ev in &*eventlist {
         let data = ev.data();
 
         // Explanation for ignoring EPIPE: https://github.com/tokio-rs/mio/issues/582

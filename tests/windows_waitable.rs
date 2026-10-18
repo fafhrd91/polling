@@ -2,8 +2,8 @@
 
 #![cfg(windows)]
 
-use polling::os::iocp::PollerIocpExt;
-use polling::{Event, Events, PollMode, Poller};
+use ntex_polling::os::iocp::PollerIocpExt;
+use ntex_polling::{Event, Events, PollMode, Poller};
 
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent};

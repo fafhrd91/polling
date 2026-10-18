@@ -32,8 +32,8 @@ pub trait PollerKqueueExt<F: Filter>: PollerSealed {
     /// # Examples
     ///
     /// ```no_run
-    /// use polling::{Events, Poller, PollMode};
-    /// use polling::os::kqueue::{Filter, PollerKqueueExt, Signal};
+    /// use ntex_polling::{Events, Poller, PollMode};
+    /// use ntex_polling::os::kqueue::{Filter, PollerKqueueExt, Signal};
     ///
     /// let poller = Poller::new().unwrap();
     ///
@@ -55,8 +55,8 @@ pub trait PollerKqueueExt<F: Filter>: PollerSealed {
     /// # Examples
     ///
     /// ```no_run
-    /// use polling::{Events, Poller, PollMode};
-    /// use polling::os::kqueue::{Filter, PollerKqueueExt, Signal};
+    /// use ntex_polling::{Events, Poller, PollMode};
+    /// use ntex_polling::os::kqueue::{Filter, PollerKqueueExt, Signal};
     ///
     /// let poller = Poller::new().unwrap();
     ///
@@ -81,8 +81,8 @@ pub trait PollerKqueueExt<F: Filter>: PollerSealed {
     /// # Examples
     ///
     /// ```no_run
-    /// use polling::{Poller, PollMode};
-    /// use polling::os::kqueue::{Filter, PollerKqueueExt, Signal};
+    /// use ntex_polling::{Poller, PollMode};
+    /// use ntex_polling::os::kqueue::{Filter, PollerKqueueExt, Signal};
     ///
     /// let poller = Poller::new().unwrap();
     ///

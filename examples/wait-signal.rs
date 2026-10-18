@@ -9,8 +9,8 @@
     not(polling_test_poll_backend),
 ))]
 mod example {
-    use polling::os::kqueue::{PollerKqueueExt, Signal};
-    use polling::{Events, PollMode, Poller};
+    use ntex_polling::os::kqueue::{PollerKqueueExt, Signal};
+    use ntex_polling::{Events, PollMode, Poller};
 
     pub(super) fn main2() {
         // Create a poller.

@@ -23,8 +23,8 @@ pub trait PollerIocpExt: PollerSealed {
     /// # Examples
     ///
     /// ```rust
-    /// use polling::{Poller, Event, Events};
-    /// use polling::os::iocp::{CompletionPacket, PollerIocpExt};
+    /// use ntex_polling::{Poller, Event, Events};
+    /// use ntex_polling::os::iocp::{CompletionPacket, PollerIocpExt};
     ///
     /// # fn main() -> std::io::Result<()> {
     /// let poller = Poller::new()?;
@@ -64,8 +64,8 @@ pub trait PollerIocpExt: PollerSealed {
     /// # Examples
     ///
     /// ```no_run
-    /// use polling::{Poller, Event, Events, PollMode};
-    /// use polling::os::iocp::PollerIocpExt;
+    /// use ntex_polling::{Poller, Event, Events, PollMode};
+    /// use ntex_polling::os::iocp::PollerIocpExt;
     ///
     /// use std::process::Command;
     ///
@@ -107,8 +107,8 @@ pub trait PollerIocpExt: PollerSealed {
     /// # Examples
     ///
     /// ```no_run
-    /// use polling::{Poller, Event, Events, PollMode};
-    /// use polling::os::iocp::PollerIocpExt;
+    /// use ntex_polling::{Poller, Event, Events, PollMode};
+    /// use ntex_polling::os::iocp::PollerIocpExt;
     ///
     /// use std::process::Command;
     ///
@@ -153,8 +153,8 @@ pub trait PollerIocpExt: PollerSealed {
     /// # Examples
     ///
     /// ```no_run
-    /// use polling::{Poller, Event, Events, PollMode};
-    /// use polling::os::iocp::PollerIocpExt;
+    /// use ntex_polling::{Poller, Event, Events, PollMode};
+    /// use ntex_polling::os::iocp::PollerIocpExt;
     ///
     /// use std::process::Command;
     ///
@@ -195,8 +195,8 @@ pub trait NotifierIocpExt: NotifierSealed {
     /// # Examples
     ///
     /// ```rust
-    /// use polling::{Poller, Event, Events};
-    /// use polling::os::iocp::{CompletionPacket, NotifierIocpExt};
+    /// use ntex_polling::{Poller, Event, Events};
+    /// use ntex_polling::os::iocp::{CompletionPacket, NotifierIocpExt};
     ///
     /// use std::thread;
     /// use std::time::Duration;
