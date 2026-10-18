@@ -234,6 +234,7 @@ impl Poller {
         };
 
         // Wait for I/O events.
+        events.reserve(0);
         epoll::wait(
             &self.epoll_fd,
             spare_capacity(&mut events.list),
@@ -374,6 +375,8 @@ fn write_flags() -> epoll::EventFlags {
 /// A list of reported I/O events.
 pub struct Events {
     list: Vec<epoll::Event>,
+    /// Number of new events a single wait can receive.
+    batch: usize,
 }
 
 unsafe impl Send for Events {}
@@ -383,7 +386,13 @@ impl Events {
     pub fn with_capacity(cap: usize) -> Events {
         Events {
             list: Vec::with_capacity(cap),
+            batch: cap,
         }
+    }
+
+    /// Makes room for at least `additional` new events, events are appended to the list.
+    fn reserve(&mut self, additional: usize) {
+        self.list.reserve(additional.max(self.batch));
     }
 
     /// Iterates over I/O events.

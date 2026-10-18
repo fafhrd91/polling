@@ -298,10 +298,7 @@ impl Poller {
 
         // A failed change is reported in the event list. If the list is full, `kevent` fails
         // and stops applying changes, so make room for all of them.
-        let spare = events.list.capacity() - events.list.len();
-        if submit.0.len() > spare {
-            events.list.reserve(submit.0.len());
-        }
+        events.reserve(submit.0.len());
 
         // Apply the changes and wait for I/O events.
         let res = unsafe {
@@ -392,6 +389,8 @@ impl Drop for Poller {
 /// A list of reported I/O events.
 pub struct Events {
     list: Vec<kqueue::Event>,
+    /// Number of new events a single wait can receive.
+    batch: usize,
 }
 
 unsafe impl Send for Events {}
@@ -401,7 +400,13 @@ impl Events {
     pub fn with_capacity(cap: usize) -> Events {
         Events {
             list: Vec::with_capacity(cap),
+            batch: cap,
         }
+    }
+
+    /// Makes room for at least `additional` new events, events are appended to the list.
+    fn reserve(&mut self, additional: usize) {
+        self.list.reserve(additional.max(self.batch));
     }
 
     /// Iterates over I/O events.
