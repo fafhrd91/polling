@@ -99,8 +99,12 @@ impl<F: Filter> PollerKqueueExt<F> for Poller {
     #[inline(always)]
     fn add_filter(&self, filter: F, key: usize, mode: PollMode) -> io::Result<()> {
         // No difference between adding and modifying in kqueue.
-        self.poller.add_source(filter.source_id())?;
-        self.modify_filter(filter, key, mode)
+        let source = filter.source_id();
+        self.poller.add_source(source)?;
+        self.modify_filter(filter, key, mode).map_err(|e| {
+            let _ = self.poller.remove_source(source);
+            e
+        })
     }
 
     fn modify_filter(&self, filter: F, key: usize, mode: PollMode) -> io::Result<()> {
