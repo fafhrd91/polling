@@ -1,6 +1,8 @@
 # Version 4.1.0 (Unreleased)
 
 - kqueue: submit immediate changes and wakeups without a heap allocation.
+- kqueue: a source whose `add` or `add_filter` fails is no longer left registered,
+  it can be added again.
 
 # Version 4.0.0
 

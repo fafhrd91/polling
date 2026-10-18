@@ -118,6 +118,10 @@ impl Poller {
 
         // File descriptors don't need to be added explicitly, so just modify the interest.
         self.modify(BorrowedFd::borrow_raw(fd), ev, mode)
+            .map_err(|e| {
+                let _ = self.remove_source(SourceId::Fd(fd));
+                e
+            })
     }
 
     /// Modifies an existing file descriptor.
