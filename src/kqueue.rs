@@ -1,7 +1,7 @@
 //! Bindings to kqueue (macOS, iOS, tvOS, watchOS, visionOS, FreeBSD, NetBSD, OpenBSD, DragonFly BSD).
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
@@ -34,7 +34,7 @@ pub struct Poller {
     notify: notify::Notify,
 
     /// Changes queued by `modify_deferred()`, submitted by the next `wait_deadline()`.
-    pending: RefCell<Changes>,
+    pending: RefCell<PendingChanges>,
 
     /// Changes being submitted by `wait_deadline()`, kept to reuse the allocation.
     submit: RefCell<Changes>,
@@ -52,6 +52,29 @@ impl std::fmt::Debug for Changes {
         f.debug_struct("Changes")
             .field("len", &self.0.len())
             .finish()
+    }
+}
+
+#[derive(Debug, Default)]
+struct PendingChanges {
+    changes: Changes,
+    /// Index of each fd's Read-then-Write pair in `changes`.
+    index: HashMap<RawFd, usize>,
+}
+
+impl PendingChanges {
+    fn remove(&mut self, fd: RawFd) {
+        if let Some(slot) = self.index.remove(&fd) {
+            // Removing Write first preserves the moved pair's Read-then-Write order.
+            self.changes.0.swap_remove(slot + 1);
+            self.changes.0.swap_remove(slot);
+            if slot < self.changes.0.len() {
+                let kqueue::EventFilter::Read(moved_fd) = self.changes.0[slot].filter() else {
+                    unreachable!("pending changes must be Read-then-Write pairs");
+                };
+                self.index.insert(moved_fd, slot);
+            }
+        }
     }
 }
 
@@ -83,7 +106,7 @@ impl Poller {
             kqueue_fd: Arc::new(kqueue_fd),
             sources: RefCell::new(HashSet::new()),
             notify: notify::Notify::new()?,
-            pending: RefCell::new(Changes::default()),
+            pending: RefCell::new(PendingChanges::default()),
             submit: RefCell::new(Changes::default()),
         };
 
@@ -144,18 +167,7 @@ impl Poller {
         self.has_source(SourceId::Fd(fd.as_raw_fd()))?;
 
         // Queued changes must not be applied after this one.
-        {
-            let mut pending = self.pending.borrow_mut();
-            if !pending.0.is_empty() {
-                let raw = fd.as_raw_fd();
-                pending.0.retain(|ev| {
-                    !matches!(
-                        ev.filter(),
-                        kqueue::EventFilter::Read(f) | kqueue::EventFilter::Write(f) if f == raw
-                    )
-                });
-            }
-        }
+        self.pending.borrow_mut().remove(fd.as_raw_fd());
 
         let mode_flags = mode_to_flags(mode);
 
@@ -213,17 +225,26 @@ impl Poller {
             }
         };
 
+        let changes = [
+            kqueue::Event::new(
+                kqueue::EventFilter::Read(fd.as_raw_fd()),
+                flags(ev.readable),
+                ev.key as _,
+            ),
+            kqueue::Event::new(
+                kqueue::EventFilter::Write(fd.as_raw_fd()),
+                flags(ev.writable),
+                ev.key as _,
+            ),
+        ];
         let mut pending = self.pending.borrow_mut();
-        pending.0.push(kqueue::Event::new(
-            kqueue::EventFilter::Read(fd.as_raw_fd()),
-            flags(ev.readable),
-            ev.key as _,
-        ));
-        pending.0.push(kqueue::Event::new(
-            kqueue::EventFilter::Write(fd.as_raw_fd()),
-            flags(ev.writable),
-            ev.key as _,
-        ));
+        if let Some(&slot) = pending.index.get(&fd.as_raw_fd()) {
+            pending.changes.0[slot..slot + 2].copy_from_slice(&changes);
+        } else {
+            let slot = pending.changes.0.len();
+            pending.changes.0.extend(changes);
+            pending.index.insert(fd.as_raw_fd(), slot);
+        }
         Ok(())
     }
 
@@ -294,7 +315,15 @@ impl Poller {
 
         // Take the queued changes.
         let mut submit = self.submit.borrow_mut();
-        std::mem::swap(&mut *self.pending.borrow_mut(), &mut *submit);
+        {
+            let mut pending = self.pending.borrow_mut();
+            std::mem::swap(&mut pending.changes, &mut *submit);
+            let used = pending.index.len();
+            pending.index.clear();
+            if pending.index.capacity() > 1024 && pending.index.capacity() / 4 > used {
+                pending.index.shrink_to(used.max(1024));
+            }
+        }
 
         // A failed change is reported in the event list. If the list is full, `kevent` fails
         // and stops applying changes, so make room for all of them.
@@ -309,7 +338,11 @@ impl Poller {
                 timeout.as_ref(),
             )
         };
+        let used = submit.0.len();
         submit.0.clear();
+        if submit.0.capacity() > 1024 && submit.0.capacity() / 4 > used {
+            submit.0.shrink_to(used.max(1024));
+        }
         drop(submit);
         let _res = res?;
 
@@ -406,7 +439,13 @@ impl Events {
 
     /// Makes room for at least `additional` new events, events are appended to the list.
     fn reserve(&mut self, additional: usize) {
-        self.list.reserve(additional.max(self.batch));
+        let additional = additional.max(self.batch);
+        let needed = self.list.len().saturating_add(additional).max(1024);
+        // Reclaim room for an earlier change burst only when demand has subsided.
+        if self.list.capacity() / 4 > needed {
+            self.list.shrink_to(needed);
+        }
+        self.list.reserve(additional);
     }
 
     /// Iterates over I/O events.
@@ -732,5 +771,145 @@ mod notify {
         pub(super) fn has_fd(&self, fd: BorrowedFd<'_>) -> bool {
             self.read_stream.as_raw_fd() == fd.as_raw_fd()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn deferred_changes_coalesce_and_keep_last_interest() -> io::Result<()> {
+        let poller = Poller::new()?;
+        let (socket, mut peer) = UnixStream::pair()?;
+        unsafe { poller.add(socket.as_raw_fd(), Event::none(0), PollMode::Oneshot)? };
+        for key in 0..8192 {
+            poller.modify_deferred(socket.as_fd(), Event::readable(key), PollMode::Level)?;
+        }
+        poller.modify_deferred(socket.as_fd(), Event::writable(8192), PollMode::Oneshot)?;
+        assert_eq!(poller.pending.borrow().changes.0.len(), 2);
+        assert_eq!(poller.pending.borrow().index.len(), 1);
+
+        let (unregistered, _peer) = UnixStream::pair()?;
+        for result in [
+            poller.modify(unregistered.as_fd(), Event::none(0), PollMode::Oneshot),
+            poller.modify_deferred(unregistered.as_fd(), Event::none(0), PollMode::Oneshot),
+        ] {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        }
+        assert_eq!(poller.pending.borrow().changes.0.len(), 2);
+
+        let mut events = Events::with_capacity(16);
+        poller.wait_deadline(&mut events, Some(Instant::now()))?;
+        assert_eq!(events.iter().collect::<Vec<_>>(), [Event::writable(8192)]);
+        assert!(poller.pending.borrow().index.is_empty());
+        assert!(poller.pending.borrow().changes.0.is_empty());
+
+        events.clear();
+        poller.modify_deferred(socket.as_fd(), Event::readable(8193), PollMode::Oneshot)?;
+        peer.write_all(b"ready")?;
+        poller.wait_deadline(&mut events, Some(Instant::now()))?;
+        assert_eq!(events.iter().collect::<Vec<_>>(), [Event::readable(8193)]);
+        poller.delete(socket.as_fd())?;
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_deferred_changes_fixes_moved_indices() -> io::Result<()> {
+        let poller = Poller::new()?;
+        let mut sockets = (0..4)
+            .map(|_| UnixStream::pair())
+            .collect::<io::Result<Vec<_>>>()?;
+        for (key, (socket, _)) in sockets.iter().enumerate() {
+            unsafe { poller.add(socket.as_raw_fd(), Event::none(key), PollMode::Oneshot)? };
+            poller.modify_deferred(socket.as_fd(), Event::readable(key), PollMode::Oneshot)?;
+        }
+        poller.delete(sockets[0].0.as_fd())?;
+        assert_eq!(poller.pending.borrow().changes.0.len(), 6);
+        poller.modify_deferred(sockets[3].0.as_fd(), Event::writable(33), PollMode::Oneshot)?;
+        poller.modify(sockets[1].0.as_fd(), Event::none(1), PollMode::Oneshot)?;
+        assert_eq!(poller.pending.borrow().changes.0.len(), 4);
+        poller.modify_deferred(sockets[2].0.as_fd(), Event::readable(22), PollMode::Oneshot)?;
+        poller.delete(sockets[1].0.as_fd())?;
+        for (_, peer) in &mut sockets {
+            peer.write_all(b"ready")?;
+        }
+
+        let mut events = Events::with_capacity(16);
+        poller.wait_deadline(&mut events, Some(Instant::now()))?;
+        let mut received = events.iter().collect::<Vec<_>>();
+        received.sort_by_key(|event| event.key);
+        assert_eq!(received, [Event::readable(22), Event::writable(33)]);
+        poller.delete(sockets[2].0.as_fd())?;
+        poller.delete(sockets[3].0.as_fd())?;
+        Ok(())
+    }
+
+    #[test]
+    fn deleted_fd_can_be_reused_with_deferred_changes() -> io::Result<()> {
+        let poller = Poller::new()?;
+        let (socket, _old_peer) = UnixStream::pair()?;
+        let mut socket = OwnedFd::from(socket);
+        let raw = socket.as_raw_fd();
+        unsafe { poller.add(raw, Event::none(0), PollMode::Oneshot)? };
+        poller.modify_deferred(socket.as_fd(), Event::readable(1), PollMode::Oneshot)?;
+        poller.delete(socket.as_fd())?;
+        assert!(poller.pending.borrow().changes.0.is_empty());
+        assert!(poller.pending.borrow().index.is_empty());
+        assert_eq!(
+            poller
+                .modify_deferred(socket.as_fd(), Event::none(2), PollMode::Oneshot)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+
+        let (replacement, mut peer) = UnixStream::pair()?;
+        // Deterministically reuse the descriptor without racing other tests' allocations.
+        rustix::io::dup2(&replacement, &mut socket)?;
+        assert_eq!(socket.as_raw_fd(), raw);
+        unsafe { poller.add(raw, Event::none(2), PollMode::Oneshot)? };
+        poller.modify_deferred(socket.as_fd(), Event::writable(3), PollMode::Oneshot)?;
+        let mut events = Events::with_capacity(16);
+        poller.wait_deadline(&mut events, Some(Instant::now()))?;
+        assert_eq!(events.iter().collect::<Vec<_>>(), [Event::writable(3)]);
+
+        events.clear();
+        poller.modify_deferred(socket.as_fd(), Event::readable(4), PollMode::Oneshot)?;
+        peer.write_all(b"ready")?;
+        poller.wait_deadline(&mut events, Some(Instant::now()))?;
+        assert_eq!(events.iter().collect::<Vec<_>>(), [Event::readable(4)]);
+        poller.delete(socket.as_fd())?;
+        Ok(())
+    }
+
+    #[test]
+    fn deferred_burst_capacity_is_reclaimed_when_idle() -> io::Result<()> {
+        let poller = Poller::new()?;
+        let sockets = (0..4096)
+            .map(|_| UnixStream::pair())
+            .collect::<io::Result<Vec<_>>>()?;
+        let mut events = Events::with_capacity(1024);
+        for (key, (socket, _)) in sockets.iter().enumerate() {
+            unsafe { poller.add(socket.as_raw_fd(), Event::none(key), PollMode::Oneshot)? };
+            poller.modify_deferred(socket.as_fd(), Event::none(key), PollMode::Oneshot)?;
+        }
+        poller.wait_deadline(&mut events, Some(Instant::now()))?;
+        assert!(events.iter().next().is_none());
+        assert!(events.capacity() >= 8192);
+        // Both alternating change buffers have been through a quiet wait.
+        for _ in 0..2 {
+            poller.wait_deadline(&mut events, Some(Instant::now()))?;
+        }
+        assert!(poller.pending.borrow().changes.0.capacity() <= 1024);
+        assert!(poller.submit.borrow().0.capacity() <= 1024);
+        assert!(poller.pending.borrow().index.capacity() <= 2048);
+        assert_eq!(events.capacity(), 1024);
+        for (socket, _) in &sockets {
+            poller.delete(socket.as_fd())?;
+        }
+        Ok(())
     }
 }

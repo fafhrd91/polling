@@ -1,4 +1,9 @@
-# Version 4.1.0 (Unreleased)
+# Version 4.2.0
+
+- kqueue: coalesce deferred changes per fd and remove them in constant time on
+  immediate modify/delete; reclaim oversized change and event buffers after bursts.
+
+# Version 4.1.0
 
 - kqueue: submit immediate changes and wakeups without a heap allocation.
 - kqueue: a source whose `add` or `add_filter` fails is no longer left registered,
